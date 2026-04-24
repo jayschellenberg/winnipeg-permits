@@ -23,6 +23,7 @@ wpg_*_permits_filtered.csv
 .Rhistory
 .RData
 .Ruserdata
+*.Rproj
 
 # Claude Code session state
 .claude/
