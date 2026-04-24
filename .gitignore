@@ -42,3 +42,5 @@ HANDOFF.md.tmp.*
 
 # Local Vercel build output
 .vercel/
+.Rproj.user
+.positai

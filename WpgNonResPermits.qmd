@@ -13,8 +13,9 @@ format:
     page-layout: full
 params:
   default_since_year: 2015
-  subtype_preselect: ["Restaurants", "Gas Service Store", "Gas Kiosk"]  # OPTIONAL - null or pre-select sub types
+  subtype_preselect: [""]  # OPTIONAL - null or pre-select sub types Restaurants", "Gas Service Store", "Gas Kiosk
   show_parcels: true
+  show_neighbourhoods: true # toggle the neighbourhood boundary overlay layer (off by default in Layers control)
 knitr:
   opts_chunk:
     message: false
@@ -42,6 +43,10 @@ suppressPackageStartupMessages({
 
 # ---- Params ----
 subtypes_param <- params$subtype_preselect
+# Drop blanks / whitespace-only entries so YAML values like `[""]` behave like null
+if (!is.null(subtypes_param)) {
+  subtypes_param <- subtypes_param[nzchar(trimws(as.character(subtypes_param)))]
+}
 if (length(subtypes_param) == 0) subtypes_param <- NULL
 default_since_year <- as.integer(params$default_since_year)
 
@@ -95,6 +100,19 @@ permits <- permits_raw |>
     issue_year        = year(issue_date),
     street_number_num = suppressWarnings(as.integer(str_extract(street_number, "^\\d+")))
   ) |>
+  # filter_slider (ionRangeSlider) bails on non-numeric values in its JSON
+  # payload. Any permit without a parseable street number must get a numeric
+  # stand-in or the slider silently fails to initialise.
+  mutate(
+    street_number_num = ifelse(
+      is.na(street_number_num),
+      suppressWarnings(min(street_number_num, na.rm = TRUE)),
+      street_number_num
+    ),
+    street_number_num = ifelse(
+      is.finite(street_number_num), as.integer(street_number_num), 0L
+    )
+  ) |>
   arrange(desc(issue_date)) |>
   mutate(.rowkey = as.character(row_number())) |>
   select(
@@ -106,6 +124,60 @@ permits <- permits_raw |>
 
 total_n <- nrow(permits)
 years_available <- sort(unique(permits$issue_year))
+
+# ---- Neighbourhood + Cluster boundary layer (local file: WpgNeighbourhoods.geojson) ----
+# The file carries ID, Name, and Cluster per polygon — we spatial-join permits to it
+# so every record gets a `cluster` (and back-fills `neighbourhood_name` where missing).
+neighbourhoods_sf <- NULL
+clusters_sf       <- NULL
+hoods_file        <- "WpgNeighbourhoods.geojson"
+if (isTRUE(params$show_neighbourhoods) && file.exists(hoods_file)) {
+  prev_s2 <- sf_use_s2(FALSE)
+  on.exit(sf_use_s2(prev_s2), add = TRUE)
+  neighbourhoods_sf <- tryCatch(
+    sf::read_sf(hoods_file, quiet = TRUE) |>
+      sf::st_zm(drop = TRUE) |>
+      dplyr::select(neighbourhood_id = ID, neighbourhood = Name, cluster = Cluster),
+    error = function(e) NULL
+  )
+  if (!is.null(neighbourhoods_sf) && nrow(neighbourhoods_sf) > 0) {
+    clusters_sf <- tryCatch(
+      neighbourhoods_sf |>
+        dplyr::group_by(cluster) |>
+        dplyr::summarise(geometry = sf::st_union(geometry), .groups = "drop"),
+      error = function(e) NULL
+    )
+  }
+}
+
+# ---- Spatial join: assign cluster (+ back-fill neighbourhood) to every permit ----
+permits$cluster <- NA_character_
+if (!is.null(neighbourhoods_sf) && nrow(neighbourhoods_sf) > 0 &&
+    sum(!is.na(permits$latitude) & !is.na(permits$longitude)) > 0) {
+  prev_s2 <- sf_use_s2(FALSE)
+  on.exit(sf_use_s2(prev_s2), add = TRUE)
+  permits_pts <- permits |>
+    filter(!is.na(latitude), !is.na(longitude)) |>
+    select(-cluster) |>  # avoid column name collision in st_join
+    st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE)
+  suppressWarnings(st_agr(neighbourhoods_sf) <- "constant")
+  hood_join <- suppressMessages(
+    st_join(permits_pts, neighbourhoods_sf, join = st_within, left = TRUE)
+  ) |>
+    sf::st_drop_geometry() |>
+    as_tibble() |>
+    select(.rowkey, .cluster = cluster, .hood_poly = neighbourhood) |>
+    (\(df) df[!duplicated(df$.rowkey), ])()
+
+  permits <- permits |>
+    select(-cluster) |>
+    left_join(hood_join, by = ".rowkey") |>
+    mutate(
+      cluster            = .cluster,
+      neighbourhood_name = coalesce(neighbourhood_name, .hood_poly)
+    ) |>
+    select(-.cluster, -.hood_poly)
+}
 
 # ---- Parcel geometry (spatial join) ----
 parcels_on_map <- NULL
@@ -174,6 +246,7 @@ if (isTRUE(params$show_parcels) && parcel_total_eligible > 0) {
         "<b>Roll #:</b> ", htmlEscape(joined$roll_number), "<br/>",
         "<b>Applicant:</b> ", htmlEscape(ifelse(is.na(joined$applicant_business_name), "—", joined$applicant_business_name)), "<br/>",
         "<b>Neighbourhood:</b> ", htmlEscape(ifelse(is.na(joined$neighbourhood_name), "—", joined$neighbourhood_name)), "<br/>",
+        "<b>Cluster:</b> ", htmlEscape(ifelse(is.na(joined$cluster), "—", joined$cluster)), "<br/>",
         "<b>Status:</b> ", htmlEscape(ifelse(is.na(joined$status), "—", joined$status)),
         "</div>"
       )
@@ -227,6 +300,22 @@ tags$style(HTML("
   margin: 8px 0 12px 0;
 }
 .count-display strong { color: #c0392b; }
+.filter-reset-row {
+  display: flex; justify-content: flex-end; margin-top: 10px;
+}
+.btn-reset {
+  padding: 6px 14px; border: 1px solid #c0392b; background: #ffffff;
+  color: #c0392b; border-radius: 4px; font-size: 13px; font-weight: 600;
+  cursor: pointer;
+}
+.btn-reset:hover { background: #c0392b; color: #ffffff; }
+.streetnum-range { display: flex; gap: 6px; align-items: center; }
+.streetnum-input {
+  flex: 1 1 0; min-width: 0; padding: 6px 8px;
+  border: 1px solid #ccc; border-radius: 4px;
+  font-size: 14px; background: white;
+}
+.streetnum-sep { color: #7a7f87; font-weight: 600; }
 "))
 ```
 
@@ -259,10 +348,59 @@ tags$div(
     ),
     tags$div(
       class = "filter-item",
-      filter_slider(
-        "f-streetnum", "Street number", sd, ~street_number_num,
-        step = 1, round = TRUE, ticks = FALSE, sep = ""
+      tags$label(class = "control-label", `for` = "f-streetnum-from", "Street number"),
+      tags$div(
+        class = "streetnum-range",
+        tags$input(
+          id = "f-streetnum-from", type = "number",
+          inputmode = "numeric", min = 0, step = 1,
+          class = "streetnum-input", placeholder = "From"
+        ),
+        tags$span(class = "streetnum-sep", "\u2013"),
+        tags$input(
+          id = "f-streetnum-to", type = "number",
+          inputmode = "numeric", min = 0, step = 1,
+          class = "streetnum-input", placeholder = "To"
+        )
       )
+    ),
+    tags$div(
+      class = "filter-item",
+      tags$div(
+        class = "form-group",
+        tags$label(class = "control-label", `for` = "f-cluster", "Cluster"),
+        tags$div(
+          tags$select(
+            id = "f-cluster",
+            multiple = "multiple",
+            style = "width: 100%;"
+          )
+        )
+      )
+    ),
+    tags$div(
+      class = "filter-item",
+      tags$div(
+        class = "form-group",
+        tags$label(class = "control-label", `for` = "f-neighbourhood", "Neighbourhood"),
+        tags$div(
+          tags$select(
+            id = "f-neighbourhood",
+            multiple = "multiple",
+            style = "width: 100%;"
+          )
+        )
+      )
+    )
+  ),
+  tags$div(
+    class = "filter-reset-row",
+    tags$button(
+      id = "btn-reset-filters",
+      class = "btn-reset",
+      type = "button",
+      onclick = "window.__resetFilters && window.__resetFilters()",
+      "Reset filters"
     )
   )
 )
@@ -338,6 +476,321 @@ if (!is.null(subtypes_param)) {
 }
 ```
 
+```{r reset-filters-js}
+preselect_json_for_reset <- if (!is.null(subtypes_param)) {
+  jsonlite::toJSON(subtypes_param)
+} else {
+  "null"
+}
+tags$script(HTML(sprintf("
+(function() {
+  var defaultYear = %d;
+  var preselect   = %s;
+
+  function getSelectize(containerId) {
+    var c = document.getElementById(containerId);
+    if (!c) return null;
+    var sel = (c.tagName === 'SELECT') ? c : c.querySelector('select');
+    return (sel && sel.selectize) ? sel.selectize : null;
+  }
+  function resetSlider(containerId) {
+    var c = document.getElementById(containerId);
+    if (!c) return;
+    var input = c.querySelector('input.js-range-slider');
+    if (!input) return;
+    if (typeof $ !== 'undefined') {
+      var inst = $(input).data('ionRangeSlider');
+      if (inst && typeof inst.reset === 'function') inst.reset();
+    }
+  }
+
+  window.__resetFilters = function() {
+    var yearSel = document.getElementById('year-filter');
+    if (yearSel) {
+      yearSel.value = String(defaultYear);
+      if (typeof window.__applyYearFilter === 'function') {
+        window.__applyYearFilter(yearSel.value);
+      }
+    }
+
+    ['f-subtype', 'f-streetname'].forEach(function(id) {
+      var sz = getSelectize(id);
+      if (sz) sz.clear(true);
+    });
+
+    if (typeof window.__resetStreetnum === 'function') window.__resetStreetnum();
+
+    ['f-cluster', 'f-neighbourhood'].forEach(function(id) {
+      var sz = getSelectize(id);
+      if (sz) sz.clear(true);
+    });
+
+    if (preselect && preselect.length) {
+      var sub = getSelectize('f-subtype');
+      if (sub) sub.setValue(preselect, false);
+    }
+
+    // Clear DT global + column search boxes and redraw
+    if (typeof $ !== 'undefined' && $.fn && $.fn.DataTable) {
+      $('table.dataTable').each(function() {
+        try {
+          var api = $(this).DataTable();
+          api.search('');
+          api.columns().search('');
+          api.draw();
+        } catch (e) {}
+      });
+    }
+
+    // Reset leaflet map view to the initial bounds captured on load
+    if (typeof window.__resetLeafletView === 'function') {
+      window.__resetLeafletView();
+    }
+  };
+})();
+", default_since_year, preselect_json_for_reset)))
+```
+
+```{r map-reset-init-js}
+tags$script(HTML("
+(function() {
+  function onReady(cb) {
+    if (document.readyState !== 'loading') cb();
+    else document.addEventListener('DOMContentLoaded', cb);
+  }
+
+  function findLeafletWidget() {
+    if (typeof HTMLWidgets === 'undefined') return null;
+    var widgets = HTMLWidgets.findAll ? HTMLWidgets.findAll('.leaflet') : [];
+    for (var i = 0; i < widgets.length; i++) {
+      if (widgets[i] && widgets[i].getMap) {
+        var m = widgets[i].getMap();
+        if (m) return m;
+      }
+      if (widgets[i] && widgets[i].map) return widgets[i].map;
+    }
+    return null;
+  }
+
+  onReady(function() {
+    var initialCenter = null;
+    var initialZoom   = null;
+    var tries = 0;
+    var iv = setInterval(function() {
+      var map = findLeafletWidget();
+      if (map && typeof map.getCenter === 'function') {
+        try {
+          initialCenter = map.getCenter();
+          initialZoom   = map.getZoom();
+          window.__resetLeafletView = function() {
+            var m = findLeafletWidget();
+            if (m && initialCenter != null && initialZoom != null) {
+              m.setView(initialCenter, initialZoom, { animate: false });
+            }
+          };
+          clearInterval(iv);
+        } catch (e) {}
+      } else if (++tries > 120) {
+        clearInterval(iv);
+      }
+    }, 150);
+  });
+})();
+"))
+```
+
+```{r streetnum-filter-js}
+streetnum_by_key_json <- jsonlite::toJSON(
+  setNames(as.list(permits$street_number_num), permits$.rowkey),
+  auto_unbox = TRUE, na = "null"
+)
+tags$script(HTML(sprintf("
+(function() {
+  var streetnumByKey = %s;
+
+  function onReady(cb) {
+    if (document.readyState !== 'loading') cb();
+    else document.addEventListener('DOMContentLoaded', cb);
+  }
+
+  onReady(function() {
+    if (typeof crosstalk === 'undefined') return;
+    var fh = new crosstalk.FilterHandle('permits');
+    var fromEl = document.getElementById('f-streetnum-from');
+    var toEl   = document.getElementById('f-streetnum-to');
+    if (!fromEl || !toEl) return;
+
+    function apply() {
+      var fromRaw = (fromEl.value || '').trim();
+      var toRaw   = (toEl.value   || '').trim();
+      if (fromRaw === '' && toRaw === '') { fh.clear(); return; }
+      var lo = fromRaw === '' ? -Infinity : parseFloat(fromRaw);
+      var hi = toRaw   === '' ?  Infinity : parseFloat(toRaw);
+      if (isNaN(lo)) lo = -Infinity;
+      if (isNaN(hi)) hi =  Infinity;
+      var matched = [];
+      for (var k in streetnumByKey) {
+        var v = streetnumByKey[k];
+        if (v == null) continue;
+        if (v >= lo && v <= hi) matched.push(k);
+      }
+      fh.set(matched);
+    }
+    fromEl.addEventListener('input',  apply);
+    fromEl.addEventListener('change', apply);
+    toEl.addEventListener('input',    apply);
+    toEl.addEventListener('change',   apply);
+
+    window.__resetStreetnum = function() {
+      fromEl.value = '';
+      toEl.value   = '';
+      fh.clear();
+    };
+  });
+})();
+", streetnum_by_key_json)))
+```
+
+```{r dynamic-filters-js}
+key_hood_json <- jsonlite::toJSON(
+  setNames(as.list(permits$neighbourhood_name), permits$.rowkey),
+  auto_unbox = TRUE, na = "null"
+)
+all_hoods_json <- jsonlite::toJSON(
+  sort(unique(permits$neighbourhood_name[!is.na(permits$neighbourhood_name)]))
+)
+key_cluster_json <- jsonlite::toJSON(
+  setNames(as.list(permits$cluster), permits$.rowkey),
+  auto_unbox = TRUE, na = "null"
+)
+all_clusters_json <- jsonlite::toJSON(
+  sort(unique(permits$cluster[!is.na(permits$cluster)]))
+)
+tags$script(HTML(sprintf("
+(function() {
+  var keyToHood    = %s;
+  var allHoods     = %s;
+  var keyToCluster = %s;
+  var allClusters  = %s;
+
+  function onReady(cb) {
+    if (document.readyState !== 'loading') cb();
+    else document.addEventListener('DOMContentLoaded', cb);
+  }
+
+  function getFilterSet(group) {
+    if (typeof crosstalk === 'undefined') return null;
+    try {
+      var g = crosstalk.group(group);
+      if (g && g.var) {
+        var v = g.var('filter');
+        if (v && typeof v.get === 'function') {
+          var fs = v.get();
+          if (fs && fs._handles) return fs;
+        }
+      }
+      for (var k in g) {
+        if (g[k] && g[k]._handles) return g[k];
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function bindDynamicFilter(selectId, keyToValue, allValues) {
+    var fh = new crosstalk.FilterHandle('permits');
+    var ourId = String(fh._id);
+    var selectEl = document.getElementById(selectId);
+    if (!selectEl) return;
+
+    $(selectEl).selectize({
+      plugins: ['remove_button'],
+      maxItems: null,
+      options: allValues.map(function(v) { return { value: v, text: v }; }),
+      placeholder: 'All',
+      onChange: function(values) {
+        var vals = values || [];
+        if (!Array.isArray(vals)) vals = vals ? [vals] : [];
+        if (vals.length === 0) { fh.clear(); return; }
+        var want = Object.create(null);
+        vals.forEach(function(v) { want[v] = true; });
+        var matched = [];
+        for (var k in keyToValue) {
+          var vv = keyToValue[k];
+          if (vv != null && want[vv]) matched.push(k);
+        }
+        fh.set(matched);
+      }
+    });
+    var selectize = selectEl.selectize;
+
+    var suppress = false;
+    function updateAvailable() {
+      if (suppress) return;
+      var fs = getFilterSet('permits');
+      var otherKeys = null;
+      if (fs && fs._handles) {
+        for (var hid in fs._handles) {
+          if (hid === ourId) continue;
+          var hkeys = fs._handles[hid];
+          if (hkeys == null) continue;
+          var cur = Object.create(null);
+          for (var i = 0; i < hkeys.length; i++) cur[hkeys[i]] = true;
+          if (otherKeys == null) {
+            otherKeys = cur;
+          } else {
+            var next = Object.create(null);
+            for (var k in otherKeys) if (cur[k]) next[k] = true;
+            otherKeys = next;
+          }
+        }
+      } else {
+        var fk = fh.filteredKeys;
+        if (fk != null) {
+          otherKeys = Object.create(null);
+          for (var j = 0; j < fk.length; j++) otherKeys[fk[j]] = true;
+        }
+      }
+
+      var available = Object.create(null);
+      if (otherKeys == null) {
+        allValues.forEach(function(v) { available[v] = true; });
+      } else {
+        for (var k2 in otherKeys) {
+          var v2 = keyToValue[k2];
+          if (v2 != null) available[v2] = true;
+        }
+      }
+      var curSel = selectize.getValue();
+      var selArr = Array.isArray(curSel) ? curSel : (curSel ? [curSel] : []);
+      selArr.forEach(function(v) { available[v] = true; });
+
+      suppress = true;
+      try {
+        Object.keys(selectize.options).forEach(function(v) {
+          if (!available[v]) selectize.removeOption(v, true);
+        });
+        Object.keys(available).forEach(function(v) {
+          if (!selectize.options[v]) selectize.addOption({ value: v, text: v });
+        });
+        selectize.refreshOptions(false);
+      } finally {
+        suppress = false;
+      }
+    }
+
+    fh.on('change', updateAvailable);
+    updateAvailable();
+  }
+
+  onReady(function() {
+    if (typeof crosstalk === 'undefined' || typeof $ === 'undefined') return;
+    bindDynamicFilter('f-cluster',       keyToCluster, allClusters);
+    bindDynamicFilter('f-neighbourhood', keyToHood,    allHoods);
+  });
+})();
+", key_hood_json, all_hoods_json, key_cluster_json, all_clusters_json)))
+```
+
 ## Map
 
 ```{r map}
@@ -351,6 +804,7 @@ popup_html <- paste0(
   "<b>Permit #:</b> ", htmlEscape(permits$permit_number), "<br/>",
   "<b>Applicant:</b> ", htmlEscape(ifelse(is.na(permits$applicant_business_name), "—", permits$applicant_business_name)), "<br/>",
   "<b>Neighbourhood:</b> ", htmlEscape(ifelse(is.na(permits$neighbourhood_name), "—", permits$neighbourhood_name)), "<br/>",
+  "<b>Cluster:</b> ", htmlEscape(ifelse(is.na(permits$cluster), "—", permits$cluster)), "<br/>",
   "<b>Status:</b> ", htmlEscape(ifelse(is.na(permits$status), "—", permits$status)),
   "</div>"
 )
@@ -362,6 +816,43 @@ map_widget <- leaflet(sd, width = "100%", height = 560) |>
   addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") |>
   addProviderTiles(providers$OpenStreetMap, group = "OSM")
 
+if (!is.null(neighbourhoods_sf) && nrow(neighbourhoods_sf) > 0) {
+  map_widget <- map_widget |>
+    addPolygons(
+      data        = neighbourhoods_sf,
+      group       = "Neighbourhoods",
+      color       = "#2b6cb0", weight = 1, opacity = 0.6,
+      fillColor   = "#2b6cb0", fillOpacity = 0.03,
+      smoothFactor = 0.5,
+      highlightOptions = highlightOptions(
+        weight = 2.5, color = "#1a4480",
+        fillOpacity = 0.12, bringToFront = FALSE
+      ),
+      label = ~paste0(neighbourhood, " — ", cluster),
+      popup = ~paste0("<b>Neighbourhood:</b> ", htmlEscape(neighbourhood),
+                      "<br/><b>Cluster:</b> ", htmlEscape(cluster)),
+      options = pathOptions(pane = "overlayPane", interactive = TRUE)
+    )
+}
+
+if (!is.null(clusters_sf) && nrow(clusters_sf) > 0) {
+  map_widget <- map_widget |>
+    addPolygons(
+      data        = clusters_sf,
+      group       = "Clusters",
+      color       = "#c05621", weight = 2.25, opacity = 0.85,
+      fillColor   = "#c05621", fillOpacity = 0.04,
+      smoothFactor = 0.5,
+      highlightOptions = highlightOptions(
+        weight = 3.5, color = "#7b341e",
+        fillOpacity = 0.12, bringToFront = FALSE
+      ),
+      label = ~cluster,
+      popup = ~paste0("<b>Cluster:</b> ", htmlEscape(cluster)),
+      options = pathOptions(pane = "overlayPane", interactive = TRUE)
+    )
+}
+
 if (!is.null(parcels_on_map) && nrow(parcels_on_map) > 0) {
   map_widget <- map_widget |>
     addPolygons(
@@ -370,7 +861,7 @@ if (!is.null(parcels_on_map) && nrow(parcels_on_map) > 0) {
       color = ~pal(sub_type), fillColor = ~pal(sub_type),
       fillOpacity = 0.25, weight = 1.5, opacity = 0.9,
       popup = ~.popup_parcel,
-      label = ~paste0(sub_type, " — ", address, " (", issue_year, ")")
+      label = ~paste0(sub_type, " — ", address, " (", issue_year, ") — ", ifelse(is.na(neighbourhood_name), "—", neighbourhood_name), " / ", ifelse(is.na(cluster), "—", cluster))
     )
 }
 
@@ -389,11 +880,20 @@ map_widget |>
     title = "Sub-type", opacity = 0.9
   ) |>
   addLayersControl(
-    baseGroups = c("Light", "Satellite", "OSM"),
-    options    = layersControlOptions(collapsed = TRUE)
+    baseGroups    = c("Light", "Satellite", "OSM"),
+    overlayGroups = c(
+      if (!is.null(neighbourhoods_sf) && nrow(neighbourhoods_sf) > 0) "Neighbourhoods",
+      if (!is.null(clusters_sf) && nrow(clusters_sf) > 0) "Clusters"
+    ),
+    options       = layersControlOptions(collapsed = TRUE)
   ) |>
   addFullscreenControl() |>
-  addScaleBar(position = "bottomleft")
+  addScaleBar(position = "bottomleft") |>
+  (\(m) {
+    if (!is.null(neighbourhoods_sf) && nrow(neighbourhoods_sf) > 0) m <- hideGroup(m, "Neighbourhoods")
+    if (!is.null(clusters_sf) && nrow(clusters_sf) > 0)           m <- hideGroup(m, "Clusters")
+    m
+  })()
 ```
 
 ```{r legend-filter-js}
@@ -595,6 +1095,7 @@ dt_data <- permits |>
     `Sub-type`      = sub_type,
     `Address`       = address,
     `Neighbourhood` = neighbourhood_name,
+    `Cluster`       = cluster,
     `Status`        = status,
     `Permit #`      = permit_number,
     `Roll #`        = roll_number,
@@ -614,14 +1115,14 @@ datatable(
     lengthMenu  = c(10, 25, 50, 100, 250),
     dom         = "Bfrtip",
     columnDefs  = list(
-      list(targets = 5:8, visible = FALSE)  # Permit #, Roll #, Lat, Lon hidden on screen
+      list(targets = 6:9, visible = FALSE)  # Permit #, Roll #, Lat, Lon hidden on screen
     ),
     buttons     = list(
       list(extend = "copy",  text = "Copy",
-           exportOptions = list(columns = 0:8, modifier = list(search = "applied"))),
+           exportOptions = list(columns = 0:9, modifier = list(search = "applied"))),
       list(extend = "csv",   text = "Download CSV (filtered)",
            filename = "wpg_nonres_new_permits_filtered",
-           exportOptions = list(columns = 0:8, modifier = list(search = "applied"))),
+           exportOptions = list(columns = 0:9, modifier = list(search = "applied"))),
       list(extend = "print", text = "Print")
     ),
     scrollX    = TRUE,

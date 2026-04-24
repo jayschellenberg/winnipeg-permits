@@ -44,6 +44,9 @@ suppressPackageStartupMessages({
 
 # ---- Params ----
 subtypes_param <- params$subtype_preselect
+if (!is.null(subtypes_param)) {
+  subtypes_param <- subtypes_param[nzchar(trimws(as.character(subtypes_param)))]
+}
 if (length(subtypes_param) == 0) subtypes_param <- NULL
 default_since_year <- as.integer(params$default_since_year)
 min_units_param    <- as.integer(params$min_units)
@@ -100,6 +103,19 @@ permits <- permits_raw |>
     issue_year              = year(issue_date),
     street_number_num       = suppressWarnings(as.integer(str_extract(street_number, "^\\d+"))),
     dwelling_units_created  = suppressWarnings(as.integer(dwelling_units_created))
+  ) |>
+  # filter_slider (ionRangeSlider) bails on non-numeric values in its JSON
+  # payload. Any permit without a parseable street number must get a numeric
+  # stand-in or the slider silently fails to initialise.
+  mutate(
+    street_number_num = ifelse(
+      is.na(street_number_num),
+      suppressWarnings(min(street_number_num, na.rm = TRUE)),
+      street_number_num
+    ),
+    street_number_num = ifelse(
+      is.finite(street_number_num), as.integer(street_number_num), 0L
+    )
   ) |>
   arrange(desc(issue_date)) |>
   mutate(.rowkey = as.character(row_number())) |>
@@ -301,6 +317,13 @@ tags$style(HTML("
   cursor: pointer;
 }
 .btn-reset:hover { background: #c0392b; color: #ffffff; }
+.streetnum-range { display: flex; gap: 6px; align-items: center; }
+.streetnum-input {
+  flex: 1 1 0; min-width: 0; padding: 6px 8px;
+  border: 1px solid #ccc; border-radius: 4px;
+  font-size: 14px; background: white;
+}
+.streetnum-sep { color: #7a7f87; font-weight: 600; }
 "))
 ```
 
@@ -333,9 +356,20 @@ tags$div(
     ),
     tags$div(
       class = "filter-item",
-      filter_slider(
-        "f-streetnum", "Street number", sd, ~street_number_num,
-        step = 1, round = TRUE, ticks = FALSE, sep = ""
+      tags$label(class = "control-label", `for` = "f-streetnum-from", "Street number"),
+      tags$div(
+        class = "streetnum-range",
+        tags$input(
+          id = "f-streetnum-from", type = "number",
+          inputmode = "numeric", min = 0, step = 1,
+          class = "streetnum-input", placeholder = "From"
+        ),
+        tags$span(class = "streetnum-sep", "\u2013"),
+        tags$input(
+          id = "f-streetnum-to", type = "number",
+          inputmode = "numeric", min = 0, step = 1,
+          class = "streetnum-input", placeholder = "To"
+        )
       )
     ),
     tags$div(
@@ -348,14 +382,13 @@ tags$div(
     tags$div(
       class = "filter-item",
       tags$div(
-        class = "form-group crosstalk-input crosstalk-input-select",
+        class = "form-group",
         tags$label(class = "control-label", `for` = "f-cluster", "Cluster"),
         tags$div(
           tags$select(
             id = "f-cluster",
-            multiple = NA,
-            style = "width: 100%;",
-            placeholder = "All"
+            multiple = "multiple",
+            style = "width: 100%;"
           )
         )
       )
@@ -363,14 +396,13 @@ tags$div(
     tags$div(
       class = "filter-item",
       tags$div(
-        class = "form-group crosstalk-input crosstalk-input-select",
+        class = "form-group",
         tags$label(class = "control-label", `for` = "f-neighbourhood", "Neighbourhood"),
         tags$div(
           tags$select(
             id = "f-neighbourhood",
-            multiple = NA,
-            style = "width: 100%;",
-            placeholder = "All"
+            multiple = "multiple",
+            style = "width: 100%;"
           )
         )
       )
@@ -476,8 +508,10 @@ tags$script(HTML(sprintf("
       if (sz) sz.clear(true);
     });
 
+    // Street number From/To inputs
+    if (typeof window.__resetStreetnum === 'function') window.__resetStreetnum();
+
     // Crosstalk sliders
-    resetSlider('f-streetnum');
     resetSlider('f-units');
 
     // Custom selectize widgets (cluster + neighbourhood)
@@ -491,9 +525,74 @@ tags$script(HTML(sprintf("
       var sub = getSelectize('f-subtype');
       if (sub) sub.setValue(preselect, false);
     }
+
+    // Clear DT global + column search boxes and redraw
+    if (typeof $ !== 'undefined' && $.fn && $.fn.DataTable) {
+      $('table.dataTable').each(function() {
+        try {
+          var api = $(this).DataTable();
+          api.search('');
+          api.columns().search('');
+          api.draw();
+        } catch (e) {}
+      });
+    }
+
+    // Reset leaflet map view to the initial bounds captured on load
+    if (typeof window.__resetLeafletView === 'function') {
+      window.__resetLeafletView();
+    }
   };
 })();
 ", default_since_year, preselect_json_for_reset)))
+```
+
+```{r map-reset-init-js}
+tags$script(HTML("
+(function() {
+  function onReady(cb) {
+    if (document.readyState !== 'loading') cb();
+    else document.addEventListener('DOMContentLoaded', cb);
+  }
+
+  function findLeafletWidget() {
+    if (typeof HTMLWidgets === 'undefined') return null;
+    var widgets = HTMLWidgets.findAll ? HTMLWidgets.findAll('.leaflet') : [];
+    for (var i = 0; i < widgets.length; i++) {
+      if (widgets[i] && widgets[i].getMap) {
+        var m = widgets[i].getMap();
+        if (m) return m;
+      }
+      if (widgets[i] && widgets[i].map) return widgets[i].map;
+    }
+    return null;
+  }
+
+  onReady(function() {
+    var initialCenter = null;
+    var initialZoom   = null;
+    var tries = 0;
+    var iv = setInterval(function() {
+      var map = findLeafletWidget();
+      if (map && typeof map.getCenter === 'function') {
+        try {
+          initialCenter = map.getCenter();
+          initialZoom   = map.getZoom();
+          window.__resetLeafletView = function() {
+            var m = findLeafletWidget();
+            if (m && initialCenter != null && initialZoom != null) {
+              m.setView(initialCenter, initialZoom, { animate: false });
+            }
+          };
+          clearInterval(iv);
+        } catch (e) {}
+      } else if (++tries > 120) {
+        clearInterval(iv);
+      }
+    }, 150);
+  });
+})();
+"))
 ```
 
 ```{r subtype-prefill-js}
@@ -521,6 +620,58 @@ if (!is.null(subtypes_param)) {
 })();
 ", jsonlite::toJSON(subtypes_param))))
 }
+```
+
+```{r streetnum-filter-js}
+streetnum_by_key_json <- jsonlite::toJSON(
+  setNames(as.list(permits$street_number_num), permits$.rowkey),
+  auto_unbox = TRUE, na = "null"
+)
+tags$script(HTML(sprintf("
+(function() {
+  var streetnumByKey = %s;
+
+  function onReady(cb) {
+    if (document.readyState !== 'loading') cb();
+    else document.addEventListener('DOMContentLoaded', cb);
+  }
+
+  onReady(function() {
+    if (typeof crosstalk === 'undefined') return;
+    var fh = new crosstalk.FilterHandle('permits');
+    var fromEl = document.getElementById('f-streetnum-from');
+    var toEl   = document.getElementById('f-streetnum-to');
+    if (!fromEl || !toEl) return;
+
+    function apply() {
+      var fromRaw = (fromEl.value || '').trim();
+      var toRaw   = (toEl.value   || '').trim();
+      if (fromRaw === '' && toRaw === '') { fh.clear(); return; }
+      var lo = fromRaw === '' ? -Infinity : parseFloat(fromRaw);
+      var hi = toRaw   === '' ?  Infinity : parseFloat(toRaw);
+      if (isNaN(lo)) lo = -Infinity;
+      if (isNaN(hi)) hi =  Infinity;
+      var matched = [];
+      for (var k in streetnumByKey) {
+        var v = streetnumByKey[k];
+        if (v == null) continue;
+        if (v >= lo && v <= hi) matched.push(k);
+      }
+      fh.set(matched);
+    }
+    fromEl.addEventListener('input',  apply);
+    fromEl.addEventListener('change', apply);
+    toEl.addEventListener('input',    apply);
+    toEl.addEventListener('change',   apply);
+
+    window.__resetStreetnum = function() {
+      fromEl.value = '';
+      toEl.value   = '';
+      fh.clear();
+    };
+  });
+})();
+", streetnum_by_key_json)))
 ```
 
 ```{r dynamic-filters-js}
