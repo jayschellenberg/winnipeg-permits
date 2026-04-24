@@ -125,34 +125,26 @@ permits <- permits_raw |>
 total_n <- nrow(permits)
 years_available <- sort(unique(permits$issue_year))
 
-# ---- Neighbourhood + Cluster boundary layer (local file: WpgNeighbourhoods.geojson) ----
-# The file carries ID, Name, and Cluster per polygon — we spatial-join permits to it
-# so every record gets a `cluster` (and back-fills `neighbourhood_name` where missing).
-neighbourhoods_sf <- NULL
-clusters_sf       <- NULL
-hoods_file        <- "WpgNeighbourhoods.geojson"
-if (isTRUE(params$show_neighbourhoods) && file.exists(hoods_file)) {
+# ---- Cluster boundary layer (local file: WpgNeighbourhoodClusters.geojson) ----
+# 23 pre-dissolved WRHA neighbourhood-cluster polygons with a `cluster` property.
+# We spatial-join permits to this file so every record gets a `cluster` tag.
+clusters_sf   <- NULL
+clusters_file <- "WpgNeighbourhoodClusters.geojson"
+if (isTRUE(params$show_neighbourhoods) && file.exists(clusters_file)) {
   prev_s2 <- sf_use_s2(FALSE)
   on.exit(sf_use_s2(prev_s2), add = TRUE)
-  neighbourhoods_sf <- tryCatch(
-    sf::read_sf(hoods_file, quiet = TRUE) |>
+  clusters_sf <- tryCatch(
+    sf::read_sf(clusters_file, quiet = TRUE) |>
       sf::st_zm(drop = TRUE) |>
-      dplyr::select(neighbourhood_id = ID, neighbourhood = Name, cluster = Cluster),
+      sf::st_make_valid() |>
+      dplyr::select(cluster),
     error = function(e) NULL
   )
-  if (!is.null(neighbourhoods_sf) && nrow(neighbourhoods_sf) > 0) {
-    clusters_sf <- tryCatch(
-      neighbourhoods_sf |>
-        dplyr::group_by(cluster) |>
-        dplyr::summarise(geometry = sf::st_union(geometry), .groups = "drop"),
-      error = function(e) NULL
-    )
-  }
 }
 
-# ---- Spatial join: assign cluster (+ back-fill neighbourhood) to every permit ----
+# ---- Spatial join: assign cluster to every permit ----
 permits$cluster <- NA_character_
-if (!is.null(neighbourhoods_sf) && nrow(neighbourhoods_sf) > 0 &&
+if (!is.null(clusters_sf) && nrow(clusters_sf) > 0 &&
     sum(!is.na(permits$latitude) & !is.na(permits$longitude)) > 0) {
   prev_s2 <- sf_use_s2(FALSE)
   on.exit(sf_use_s2(prev_s2), add = TRUE)
@@ -160,23 +152,37 @@ if (!is.null(neighbourhoods_sf) && nrow(neighbourhoods_sf) > 0 &&
     filter(!is.na(latitude), !is.na(longitude)) |>
     select(-cluster) |>  # avoid column name collision in st_join
     st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE)
-  suppressWarnings(st_agr(neighbourhoods_sf) <- "constant")
+  suppressWarnings(st_agr(clusters_sf) <- "constant")
   hood_join <- suppressMessages(
-    st_join(permits_pts, neighbourhoods_sf, join = st_within, left = TRUE)
+    st_join(permits_pts, clusters_sf, join = st_within, left = TRUE)
   ) |>
     sf::st_drop_geometry() |>
     as_tibble() |>
-    select(.rowkey, .cluster = cluster, .hood_poly = neighbourhood) |>
+    select(.rowkey, .cluster = cluster) |>
     (\(df) df[!duplicated(df$.rowkey), ])()
+
+  missing_spatial <- hood_join |>
+    filter(is.na(.cluster)) |>
+    pull(.rowkey)
+  if (length(missing_spatial) > 0) {
+    nearest_pts <- permits_pts |>
+      filter(.rowkey %in% missing_spatial)
+    nearest_idx <- sf::st_nearest_feature(nearest_pts, clusters_sf)
+    nearest_join <- tibble(
+      .rowkey  = nearest_pts$.rowkey,
+      .cluster = clusters_sf$cluster[nearest_idx]
+    )
+    hood_join <- hood_join |>
+      filter(!(.rowkey %in% missing_spatial)) |>
+      bind_rows(nearest_join) |>
+      (\(df) df[!duplicated(df$.rowkey), ])()
+  }
 
   permits <- permits |>
     select(-cluster) |>
     left_join(hood_join, by = ".rowkey") |>
-    mutate(
-      cluster            = .cluster,
-      neighbourhood_name = coalesce(neighbourhood_name, .hood_poly)
-    ) |>
-    select(-.cluster, -.hood_poly)
+    mutate(cluster = .cluster) |>
+    select(-.cluster)
 }
 
 # ---- Parcel geometry (spatial join) ----
@@ -493,15 +499,24 @@ tags$script(HTML(sprintf("
       }
     }
 
-    // silent=false so selectize fires its change event, which is what
-    // crosstalk's FilterHandle listens for. With silent=true the widget
-    // empties visually but the filter stays applied.
-    ['f-subtype', 'f-streetname', 'f-cluster', 'f-neighbourhood'].forEach(function(id) {
-      var sz = getSelectize(id);
-      if (sz) sz.clear(false);
-    });
+    // clearAllExceptYear wipes every filter_select (silent=false so crosstalk
+    // sees the change) and resets the streetnum From/To boxes under a
+    // suppression flag so narrowAll doesn't cascade mid-clear.
+    if (typeof window.__clearAllExceptYear === 'function') {
+      window.__clearAllExceptYear();
+    } else {
+      ['f-subtype', 'f-streetname', 'f-cluster', 'f-neighbourhood'].forEach(function(id) {
+        var sz = getSelectize(id);
+        if (sz) sz.clear(false);
+      });
+      if (typeof window.__resetStreetnum === 'function') window.__resetStreetnum();
+    }
 
-    if (typeof window.__resetStreetnum === 'function') window.__resetStreetnum();
+    // Re-narrow dropdown options based on the (now reset) filter state —
+    // keeps options consistent with what the user sees before any preselect.
+    if (typeof window.__narrowAll === 'function') {
+      window.__narrowAll();
+    }
 
     if (preselect && preselect.length) {
       var sub = getSelectize('f-subtype');
@@ -629,6 +644,220 @@ tags$script(HTML(sprintf("
 ", streetnum_by_key_json)))
 ```
 
+```{r interactive-narrow-js}
+# Per-rowkey payloads for MUTUAL narrowing. Every dropdown narrows its visible
+# options to values that still exist in the intersection of (year floor) + all
+# OTHER active filter selections + streetnum range. Year is primary — a year
+# change wipes every other filter before re-narrowing.
+key_subtype_n    <- jsonlite::toJSON(
+  setNames(as.list(permits$sub_type),           permits$.rowkey),
+  auto_unbox = TRUE, na = "null"
+)
+key_streetname_n <- jsonlite::toJSON(
+  setNames(as.list(permits$street_name),        permits$.rowkey),
+  auto_unbox = TRUE, na = "null"
+)
+key_cluster_n    <- jsonlite::toJSON(
+  setNames(as.list(permits$cluster),            permits$.rowkey),
+  auto_unbox = TRUE, na = "null"
+)
+key_hood_n       <- jsonlite::toJSON(
+  setNames(as.list(permits$neighbourhood_name), permits$.rowkey),
+  auto_unbox = TRUE, na = "null"
+)
+key_year_n       <- jsonlite::toJSON(
+  setNames(as.integer(permits$issue_year),      permits$.rowkey),
+  auto_unbox = TRUE, na = "null"
+)
+key_streetnum_n  <- jsonlite::toJSON(
+  setNames(as.list(permits$street_number_num),  permits$.rowkey),
+  auto_unbox = TRUE, na = "null"
+)
+
+tags$script(HTML(sprintf("
+(function() {
+  var KEY = {
+    subtype:    %s,
+    streetname: %s,
+    cluster:    %s,
+    hood:       %s,
+    year:       %s,
+    streetnum:  %s
+  };
+
+  var WIDGETS = [
+    { id: 'f-subtype',       key: 'subtype'    },
+    { id: 'f-streetname',    key: 'streetname' },
+    { id: 'f-cluster',       key: 'cluster'    },
+    { id: 'f-neighbourhood', key: 'hood'       }
+  ];
+
+  var suppressNarrow = false;
+
+  function onReady(cb) {
+    if (document.readyState !== 'loading') cb();
+    else document.addEventListener('DOMContentLoaded', cb);
+  }
+
+  function getSelectizeFor(containerId) {
+    var c = document.getElementById(containerId);
+    if (!c) return null;
+    var sel = (c.tagName === 'SELECT') ? c : c.querySelector('select');
+    return (sel && sel.selectize) ? sel.selectize : null;
+  }
+
+  function currentYear() {
+    var s = document.getElementById('year-filter');
+    if (!s) return null;
+    var v = parseInt(s.value, 10);
+    return isNaN(v) ? null : v;
+  }
+
+  function currentSelectionSet(id) {
+    var sz = getSelectizeFor(id);
+    if (!sz) return null;
+    var v = sz.getValue();
+    if (v == null) return null;
+    var arr = Array.isArray(v) ? v : (v === '' ? [] : [v]);
+    if (!arr.length) return null;
+    var set = Object.create(null);
+    arr.forEach(function(x) { if (x != null && x !== '') set[x] = true; });
+    return Object.keys(set).length ? set : null;
+  }
+
+  function currentStreetnumRange() {
+    var f = document.getElementById('f-streetnum-from');
+    var t = document.getElementById('f-streetnum-to');
+    var fromRaw = ((f && f.value) || '').trim();
+    var toRaw   = ((t && t.value) || '').trim();
+    if (fromRaw === '' && toRaw === '') return null;
+    var lo = fromRaw === '' ? -Infinity : parseFloat(fromRaw);
+    var hi = toRaw   === '' ?  Infinity : parseFloat(toRaw);
+    if (isNaN(lo)) lo = -Infinity;
+    if (isNaN(hi)) hi =  Infinity;
+    return { lo: lo, hi: hi };
+  }
+
+  // Rowkeys matching year + every active filter EXCEPT excludeWidgetId, so the
+  // widget being narrowed doesn't filter itself out of its own dropdown.
+  function rowkeysMatching(excludeWidgetId) {
+    var minYear = currentYear();
+    var filters = [];
+    WIDGETS.forEach(function(w) {
+      if (w.id === excludeWidgetId) return;
+      var sel = currentSelectionSet(w.id);
+      if (sel) filters.push({ key: w.key, set: sel });
+    });
+    var snRange = currentStreetnumRange();
+
+    var out = [];
+    var yearMap = KEY.year;
+    for (var k in yearMap) {
+      var y = yearMap[k];
+      if (minYear != null && (y == null || y < minYear)) continue;
+      var ok = true;
+      for (var i = 0; i < filters.length; i++) {
+        var val = KEY[filters[i].key][k];
+        if (val == null || !filters[i].set[val]) { ok = false; break; }
+      }
+      if (!ok) continue;
+      if (snRange) {
+        var sv = KEY.streetnum[k];
+        if (sv == null || sv < snRange.lo || sv > snRange.hi) continue;
+      }
+      out.push(k);
+    }
+    return out;
+  }
+
+  function narrowOne(widget) {
+    var sz = getSelectizeFor(widget.id);
+    if (!sz) return;
+    var rowkeys = rowkeysMatching(widget.id);
+    var keyToValue = KEY[widget.key];
+    var keep = Object.create(null);
+    for (var i = 0; i < rowkeys.length; i++) {
+      var v = keyToValue[rowkeys[i]];
+      if (v != null) keep[v] = true;
+    }
+    // Preserve current selection so selectize doesn't drop displayed items.
+    var cur = sz.getValue();
+    if (cur) {
+      (Array.isArray(cur) ? cur : [cur]).forEach(function(v) {
+        if (v) keep[v] = true;
+      });
+    }
+    Object.keys(sz.options).forEach(function(v) {
+      if (!keep[v]) sz.removeOption(v, true);
+    });
+    Object.keys(keep).forEach(function(v) {
+      if (!sz.options[v]) sz.addOption({ value: v, text: v });
+    });
+    sz.refreshOptions(false);
+  }
+
+  function narrowAll() {
+    if (suppressNarrow) return;
+    WIDGETS.forEach(narrowOne);
+  }
+  window.__narrowAll = narrowAll;
+
+  function clearOthers() {
+    suppressNarrow = true;
+    try {
+      WIDGETS.forEach(function(w) {
+        var sz = getSelectizeFor(w.id);
+        if (sz) sz.clear(false);
+      });
+      if (typeof window.__resetStreetnum === 'function') {
+        window.__resetStreetnum();
+      }
+    } finally {
+      suppressNarrow = false;
+    }
+  }
+  window.__clearAllExceptYear = clearOthers;
+
+  onReady(function() {
+    var yearSel = document.getElementById('year-filter');
+
+    // Year is primary: changing it wipes every other filter, then re-narrows.
+    if (yearSel) {
+      yearSel.addEventListener('change', function() {
+        clearOthers();
+        narrowAll();
+      });
+    }
+
+    // Streetnum From/To boxes trigger mutual narrowing too.
+    ['f-streetnum-from', 'f-streetnum-to'].forEach(function(id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener('input',  narrowAll);
+      el.addEventListener('change', narrowAll);
+    });
+
+    // Wait for all selectize widgets to initialise, attach change hooks, then
+    // do the first narrow pass.
+    var tries = 0;
+    var iv = setInterval(function() {
+      var ready = WIDGETS.every(function(w) { return getSelectizeFor(w.id); });
+      if (ready) {
+        WIDGETS.forEach(function(w) {
+          var sz = getSelectizeFor(w.id);
+          sz.on('change', narrowAll);
+        });
+        narrowAll();
+        clearInterval(iv);
+      } else if (++tries > 120) {
+        clearInterval(iv);
+      }
+    }, 100);
+  });
+})();
+", key_subtype_n, key_streetname_n, key_cluster_n, key_hood_n, key_year_n, key_streetnum_n)))
+```
+
 ## Map
 
 ```{r map}
@@ -653,25 +882,6 @@ map_widget <- leaflet(sd, width = "100%", height = 560) |>
   addProviderTiles(providers$CartoDB.Positron, group = "Light") |>
   addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") |>
   addProviderTiles(providers$OpenStreetMap, group = "OSM")
-
-if (!is.null(neighbourhoods_sf) && nrow(neighbourhoods_sf) > 0) {
-  map_widget <- map_widget |>
-    addPolygons(
-      data        = neighbourhoods_sf,
-      group       = "Neighbourhoods",
-      color       = "#2b6cb0", weight = 1, opacity = 0.6,
-      fillColor   = "#2b6cb0", fillOpacity = 0.03,
-      smoothFactor = 0.5,
-      highlightOptions = highlightOptions(
-        weight = 2.5, color = "#1a4480",
-        fillOpacity = 0.12, bringToFront = FALSE
-      ),
-      label = ~paste0(neighbourhood, " — ", cluster),
-      popup = ~paste0("<b>Neighbourhood:</b> ", htmlEscape(neighbourhood),
-                      "<br/><b>Cluster:</b> ", htmlEscape(cluster)),
-      options = pathOptions(pane = "overlayPane", interactive = TRUE)
-    )
-}
 
 if (!is.null(clusters_sf) && nrow(clusters_sf) > 0) {
   map_widget <- map_widget |>
@@ -720,7 +930,6 @@ map_widget |>
   addLayersControl(
     baseGroups    = c("Light", "Satellite", "OSM"),
     overlayGroups = c(
-      if (!is.null(neighbourhoods_sf) && nrow(neighbourhoods_sf) > 0) "Neighbourhoods",
       if (!is.null(clusters_sf) && nrow(clusters_sf) > 0) "Clusters"
     ),
     options       = layersControlOptions(collapsed = TRUE)
@@ -728,8 +937,7 @@ map_widget |>
   addFullscreenControl() |>
   addScaleBar(position = "bottomleft") |>
   (\(m) {
-    if (!is.null(neighbourhoods_sf) && nrow(neighbourhoods_sf) > 0) m <- hideGroup(m, "Neighbourhoods")
-    if (!is.null(clusters_sf) && nrow(clusters_sf) > 0)           m <- hideGroup(m, "Clusters")
+    if (!is.null(clusters_sf) && nrow(clusters_sf) > 0) m <- hideGroup(m, "Clusters")
     m
   })()
 ```
