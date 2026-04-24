@@ -1,0 +1,661 @@
+---
+title: "Winnipeg New Construction Permits (Non-Residential Only)"
+author: "Jason M. Schellenberg, P. App, AACI"
+date: today
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 2
+    toc-location: left
+    theme: cosmo
+    smooth-scroll: true
+    page-layout: full
+params:
+  default_since_year: 2015
+  subtype_preselect: ["Restaurants", "Gas Service Store", "Gas Kiosk"]  # OPTIONAL - null or pre-select sub types
+  show_parcels: true
+knitr:
+  opts_chunk:
+    message: false
+    warning: false
+    echo: false
+---
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(httr2)
+  library(jsonlite)
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(lubridate)
+  library(leaflet)
+  library(leaflet.extras)
+  library(DT)
+  library(crosstalk)
+  library(htmltools)
+  library(downloadthis)
+  library(rlang)
+  library(sf)
+})
+
+# ---- Params ----
+subtypes_param <- params$subtype_preselect
+if (length(subtypes_param) == 0) subtypes_param <- NULL
+default_since_year <- as.integer(params$default_since_year)
+
+# ---- Query ----
+render_date_iso <- format(Sys.Date(), "%Y-%m-%d")
+soql_parts <- c(
+  "issue_date >= '2010-01-01'",
+  sprintf("issue_date < '%s'", render_date_iso),
+  "work_type = 'Construct New'",
+  "permit_group = 'Non-Residential'"
+)
+# `subtypes_param` drives UI pre-selection only (in the filter widget below);
+# the full dataset is fetched so users can clear the filter to see other sub-types.
+query_str <- paste(
+  "SELECT *",
+  "WHERE", paste(soql_parts, collapse = " AND "),
+  "ORDER BY issue_date DESC",
+  "LIMIT 50000"
+)
+
+# ---- Cache: 24h TTL, key off query contents ----
+cache_dir <- ".cache"
+if (!dir.exists(cache_dir)) dir.create(cache_dir, recursive = TRUE)
+qhash <- substr(rlang::hash(query_str), 1, 10)
+cache_file <- file.path(cache_dir, paste0("permits_", qhash, ".rds"))
+fresh <- file.exists(cache_file) &&
+  difftime(Sys.time(), file.info(cache_file)$mtime, units = "hours") < 24
+
+endpoint <- "https://data.winnipeg.ca/resource/it4w-cpf4.json"
+if (fresh) {
+  permits_raw <- readRDS(cache_file)
+  data_source <- sprintf("Cached (fetched %s)",
+                         format(file.info(cache_file)$mtime, "%Y-%m-%d %H:%M %Z"))
+} else {
+  resp <- request(endpoint) |>
+    req_url_query(`$query` = query_str) |>
+    req_retry(max_tries = 3) |>
+    req_perform()
+  permits_raw <- resp |> resp_body_string() |> fromJSON(flatten = TRUE)
+  saveRDS(permits_raw, cache_file)
+  data_source <- sprintf("Live (fetched %s)", format(Sys.time(), "%Y-%m-%d %H:%M %Z"))
+}
+
+# ---- Tidy ----
+permits <- permits_raw |>
+  as_tibble() |>
+  mutate(
+    issue_date        = as_date(ymd_hms(issue_date, quiet = TRUE)),
+    latitude          = suppressWarnings(as.numeric(location.latitude)),
+    longitude         = suppressWarnings(as.numeric(location.longitude)),
+    issue_year        = year(issue_date),
+    street_number_num = suppressWarnings(as.integer(str_extract(street_number, "^\\d+")))
+  ) |>
+  arrange(desc(issue_date)) |>
+  mutate(.rowkey = as.character(row_number())) |>
+  select(
+    .rowkey, sub_type, issue_date, issue_year, permit_number, address,
+    street_number, street_number_num, street_name,
+    applicant_business_name, neighbourhood_name, ward, status,
+    major_project, latitude, longitude
+  )
+
+total_n <- nrow(permits)
+years_available <- sort(unique(permits$issue_year))
+
+# ---- Parcel geometry (spatial join) ----
+parcels_on_map <- NULL
+parcel_match_count <- 0L
+parcel_total_eligible <- sum(!is.na(permits$latitude) & !is.na(permits$longitude))
+
+if (isTRUE(params$show_parcels) && parcel_total_eligible > 0) {
+  parcel_endpoint <- "https://data.winnipeg.ca/resource/d4mq-wa44.geojson"
+  parcels_cache <- file.path(cache_dir, paste0("parcels_", qhash, ".rds"))
+  parcels_fresh <- file.exists(parcels_cache) &&
+    difftime(Sys.time(), file.info(parcels_cache)$mtime, units = "hours") < 168
+
+  if (parcels_fresh) {
+    parcels_sf <- readRDS(parcels_cache)
+  } else {
+    loc_unique <- permits |>
+      filter(!is.na(latitude), !is.na(longitude)) |>
+      distinct(latitude, longitude)
+    d <- 0.0015  # ~150 m buffer around each permit on centroid bbox
+    bbox_clauses <- sprintf(
+      "(centroid_lat BETWEEN %.6f AND %.6f AND centroid_lon BETWEEN %.6f AND %.6f)",
+      loc_unique$latitude - d, loc_unique$latitude + d,
+      loc_unique$longitude - d, loc_unique$longitude + d
+    )
+    batch_size <- 60
+    batches <- split(bbox_clauses, ceiling(seq_along(bbox_clauses) / batch_size))
+    parcel_list <- lapply(batches, function(cls) {
+      q <- sprintf(
+        "SELECT roll_number, full_address, geometry WHERE %s LIMIT 50000",
+        paste(cls, collapse = " OR ")
+      )
+      url <- paste0(parcel_endpoint, "?$query=",
+                    utils::URLencode(q, reserved = TRUE))
+      tryCatch(sf::read_sf(url, quiet = TRUE), error = function(e) NULL)
+    })
+    parcel_list <- parcel_list[!vapply(parcel_list, is.null, logical(1))]
+    if (length(parcel_list) > 0) {
+      parcels_sf <- do.call(rbind, parcel_list)
+      parcels_sf <- parcels_sf[!duplicated(parcels_sf$roll_number), ]
+      saveRDS(parcels_sf, parcels_cache)
+    } else {
+      parcels_sf <- NULL
+    }
+  }
+
+  if (!is.null(parcels_sf) && nrow(parcels_sf) > 0) {
+    prev_s2 <- sf_use_s2(FALSE)
+    on.exit(sf_use_s2(prev_s2), add = TRUE)
+    permits_pts <- permits |>
+      filter(!is.na(latitude), !is.na(longitude)) |>
+      st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE)
+    suppressWarnings(st_agr(parcels_sf) <- "constant")
+    joined <- suppressMessages(
+      st_join(permits_pts, parcels_sf, join = st_within, left = FALSE)
+    )
+    joined <- joined[!duplicated(joined$.rowkey), ]
+    if (nrow(joined) > 0) {
+      idx <- match(joined$roll_number, parcels_sf$roll_number)
+      st_geometry(joined) <- st_geometry(parcels_sf)[idx]
+      joined$.popup_parcel <- paste0(
+        "<div style='font-family:sans-serif;font-size:12px;line-height:1.4;'>",
+        "<strong>", htmlEscape(joined$sub_type), "</strong><br/>",
+        "<b>Address:</b> ", htmlEscape(joined$address), "<br/>",
+        "<b>Issued:</b> ", format(joined$issue_date, "%Y-%m-%d"), "<br/>",
+        "<b>Permit #:</b> ", htmlEscape(joined$permit_number), "<br/>",
+        "<b>Roll #:</b> ", htmlEscape(joined$roll_number), "<br/>",
+        "<b>Applicant:</b> ", htmlEscape(ifelse(is.na(joined$applicant_business_name), "—", joined$applicant_business_name)), "<br/>",
+        "<b>Neighbourhood:</b> ", htmlEscape(ifelse(is.na(joined$neighbourhood_name), "—", joined$neighbourhood_name)), "<br/>",
+        "<b>Status:</b> ", htmlEscape(ifelse(is.na(joined$status), "—", joined$status)),
+        "</div>"
+      )
+      parcels_on_map <- joined
+      parcel_match_count <- nrow(parcels_on_map)
+    }
+  }
+}
+```
+
+::: {.callout-note appearance="simple"}
+**Data scope:** Building permits issued since **January 1, 2010** for **permit group = Non-Residential** and **work type = Construct New**. Source: City of Winnipeg Open Data — [Building Permits (it4w-cpf4)](https://data.winnipeg.ca/Permits-Licenses/Building-Permits/it4w-cpf4). **`r data_source`**. Cache refreshes automatically after 24 hours.`r if (isTRUE(params$show_parcels)) sprintf(" Parcel polygons joined from [Assessment Parcels (d4mq-wa44)](https://data.winnipeg.ca/Assessment-Taxation-Corporate/Assessment-Parcels/d4mq-wa44) — **%s of %s** permits matched (%.0f%%).", format(parcel_match_count, big.mark = ","), format(parcel_total_eligible, big.mark = ","), 100 * parcel_match_count / max(parcel_total_eligible, 1))`
+:::
+
+```{r prefilter-notice, results='asis'}
+if (!is.null(subtypes_param)) {
+  cat(sprintf(
+    '::: {.callout-warning appearance="simple"}\n**Pre-selected sub-types:** the Sub-type filter is pre-set to **%s**. Clear or change the selection in the filter bar to see other sub-types.\n:::\n',
+    paste(subtypes_param, collapse = ", ")
+  ))
+}
+```
+
+```{r shared-data}
+sd <- SharedData$new(permits, key = ~.rowkey, group = "permits")
+```
+
+```{r filter-bar-styles}
+tags$style(HTML("
+.filter-bar {
+  position: sticky; top: 0; z-index: 500;
+  background: #ffffff; padding: 12px 16px;
+  border-bottom: 1px solid #ddd;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+  margin-bottom: 16px;
+}
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px 16px; align-items: start;
+}
+.filter-item label { font-weight: 600; font-size: 13px; display: block; margin-bottom: 4px; }
+.filter-item select.year-select {
+  width: 100%; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px;
+  font-size: 14px; background: white;
+}
+.filter-item .form-group { margin-bottom: 0 !important; }
+.filter-item .control-label { font-weight: 600 !important; font-size: 13px !important; }
+.count-display {
+  font-size: 15px; font-weight: 500; color: #333;
+  margin: 8px 0 12px 0;
+}
+.count-display strong { color: #c0392b; }
+"))
+```
+
+```{r filter-bar}
+year_options <- tagList(lapply(2010:year(Sys.Date()), function(y) {
+  tags$option(value = y, selected = if (y == default_since_year) NA else NULL, as.character(y))
+}))
+
+tags$div(
+  class = "filter-bar",
+  tags$div(
+    class = "filter-grid",
+    tags$div(
+      class = "filter-item",
+      tags$label("Issued since year", `for` = "year-filter"),
+      tags$select(
+        id = "year-filter",
+        class = "year-select",
+        onchange = "window.__applyYearFilter(this.value)",
+        year_options
+      )
+    ),
+    tags$div(
+      class = "filter-item",
+      filter_select("f-subtype", "Sub-type", sd, ~sub_type, multiple = TRUE)
+    ),
+    tags$div(
+      class = "filter-item",
+      filter_select("f-streetname", "Street name", sd, ~street_name, multiple = TRUE)
+    ),
+    tags$div(
+      class = "filter-item",
+      filter_slider(
+        "f-streetnum", "Street number", sd, ~street_number_num,
+        step = 1, round = TRUE, ticks = FALSE, sep = ""
+      )
+    )
+  )
+)
+```
+
+```{r count-display}
+tags$div(
+  class = "count-display",
+  id = "count-display",
+  HTML(sprintf("Showing <strong id='count-shown'>%s</strong> of %s permits",
+               format(total_n, big.mark = ","),
+               format(total_n, big.mark = ",")))
+)
+```
+
+```{r year-filter-js}
+year_data_json <- jsonlite::toJSON(permits$issue_year)
+tags$script(HTML(sprintf("
+(function() {
+  var years = %s;
+  var keys  = years.map(function(_, i) { return String(i + 1); });
+
+  function onReady(cb) {
+    if (document.readyState !== 'loading') cb();
+    else document.addEventListener('DOMContentLoaded', cb);
+  }
+
+  onReady(function() {
+    if (typeof crosstalk === 'undefined') return;
+    var fh = new crosstalk.FilterHandle('permits');
+
+    window.__applyYearFilter = function(yearStr) {
+      var y = parseInt(yearStr, 10);
+      if (isNaN(y)) { fh.clear(); return; }
+      var matched = [];
+      for (var i = 0; i < years.length; i++) {
+        if (years[i] >= y) matched.push(keys[i]);
+      }
+      fh.set(matched);
+    };
+
+    var sel = document.getElementById('year-filter');
+    if (sel) window.__applyYearFilter(sel.value);
+  });
+})();
+", year_data_json)))
+```
+
+```{r subtype-prefill-js}
+if (!is.null(subtypes_param)) {
+  tags$script(HTML(sprintf("
+(function() {
+  var preselect = %s;
+  function onReady(cb) {
+    if (document.readyState !== 'loading') cb();
+    else document.addEventListener('DOMContentLoaded', cb);
+  }
+  onReady(function() {
+    var tries = 0;
+    var iv = setInterval(function() {
+      var container = document.getElementById('f-subtype');
+      var sel = container ? container.querySelector('select') : null;
+      if (sel && sel.selectize) {
+        sel.selectize.setValue(preselect, false);
+        clearInterval(iv);
+      } else if (++tries > 80) {
+        clearInterval(iv);
+      }
+    }, 100);
+  });
+})();
+", jsonlite::toJSON(subtypes_param))))
+}
+```
+
+## Map
+
+```{r map}
+pal <- colorFactor(palette = "viridis", domain = sort(unique(permits$sub_type)))
+
+popup_html <- paste0(
+  "<div style='font-family:sans-serif;font-size:12px;line-height:1.4;'>",
+  "<strong>", htmlEscape(permits$sub_type), "</strong><br/>",
+  "<b>Address:</b> ", htmlEscape(permits$address), "<br/>",
+  "<b>Issued:</b> ", format(permits$issue_date, "%Y-%m-%d"), "<br/>",
+  "<b>Permit #:</b> ", htmlEscape(permits$permit_number), "<br/>",
+  "<b>Applicant:</b> ", htmlEscape(ifelse(is.na(permits$applicant_business_name), "—", permits$applicant_business_name)), "<br/>",
+  "<b>Neighbourhood:</b> ", htmlEscape(ifelse(is.na(permits$neighbourhood_name), "—", permits$neighbourhood_name)), "<br/>",
+  "<b>Status:</b> ", htmlEscape(ifelse(is.na(permits$status), "—", permits$status)),
+  "</div>"
+)
+permits$.popup <- popup_html
+sd <- SharedData$new(permits, key = ~.rowkey, group = "permits")
+
+map_widget <- leaflet(sd, width = "100%", height = 560) |>
+  addProviderTiles(providers$CartoDB.Positron, group = "Light") |>
+  addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") |>
+  addProviderTiles(providers$OpenStreetMap, group = "OSM")
+
+if (!is.null(parcels_on_map) && nrow(parcels_on_map) > 0) {
+  map_widget <- map_widget |>
+    addPolygons(
+      data = parcels_on_map,
+      layerId = ~.rowkey,
+      color = ~pal(sub_type), fillColor = ~pal(sub_type),
+      fillOpacity = 0.25, weight = 1.5, opacity = 0.9,
+      popup = ~.popup_parcel,
+      label = ~paste0(sub_type, " — ", address, " (", issue_year, ")")
+    )
+}
+
+map_widget |>
+  addCircleMarkers(
+    lng = ~longitude, lat = ~latitude,
+    color = ~pal(sub_type), fillColor = ~pal(sub_type),
+    fillOpacity = 0.85, stroke = TRUE, weight = 1, opacity = 1,
+    radius = 6,
+    popup = ~.popup,
+    label = ~paste0(sub_type, " — ", address, " (", issue_year, ")")
+  ) |>
+  addLegend(
+    position = "bottomright", pal = pal,
+    values = sort(unique(permits$sub_type)),
+    title = "Sub-type", opacity = 0.9
+  ) |>
+  addLayersControl(
+    baseGroups = c("Light", "Satellite", "OSM"),
+    options    = layersControlOptions(collapsed = TRUE)
+  ) |>
+  addFullscreenControl() |>
+  addScaleBar(position = "bottomleft")
+```
+
+```{r legend-filter-js}
+key_subtype_json <- jsonlite::toJSON(
+  setNames(as.list(permits$sub_type), permits$.rowkey),
+  auto_unbox = TRUE
+)
+tags$script(HTML(sprintf("
+(function() {
+  var keyToSubtype = %s;
+
+  function onReady(cb) {
+    if (document.readyState !== 'loading') cb();
+    else document.addEventListener('DOMContentLoaded', cb);
+  }
+
+  function findLegend() {
+    return document.querySelector('.leaflet-container .info.legend');
+  }
+
+  function wrapLegend(legend) {
+    if (legend.getAttribute('data-reactive') === '1') return;
+    var swatches = legend.querySelectorAll('i');
+    swatches.forEach(function(iEl) {
+      var parts = [iEl];
+      var label = '';
+      var n = iEl.nextSibling;
+      while (n) {
+        if (n.nodeType === 3) {
+          label += n.nodeValue;
+          parts.push(n);
+          n = n.nextSibling;
+        } else if (n.nodeType === 1 && n.tagName === 'BR') {
+          parts.push(n);
+          break;
+        } else {
+          break;
+        }
+      }
+      var span = document.createElement('span');
+      span.className = 'legend-entry';
+      span.setAttribute('data-label', label.trim());
+      iEl.parentNode.insertBefore(span, iEl);
+      parts.forEach(function(p) { span.appendChild(p); });
+    });
+    legend.setAttribute('data-reactive', '1');
+  }
+
+  onReady(function() {
+    if (typeof crosstalk === 'undefined') return;
+    var fh = new crosstalk.FilterHandle('permits');
+    var legendReady = false;
+
+    function update() {
+      var legend = findLegend();
+      if (!legend) return;
+      var keys = fh.filteredKeys;
+      var visible = null;
+      if (keys != null) {
+        visible = Object.create(null);
+        for (var i = 0; i < keys.length; i++) {
+          var st = keyToSubtype[keys[i]];
+          if (st) visible[st] = true;
+        }
+      }
+      var entries = legend.querySelectorAll('.legend-entry');
+      entries.forEach(function(e) {
+        var label = e.getAttribute('data-label');
+        e.style.display = (visible == null || visible[label]) ? '' : 'none';
+      });
+    }
+
+    fh.on('change', function() { if (legendReady) update(); });
+
+    var tries = 0;
+    var iv = setInterval(function() {
+      var legend = findLegend();
+      if (legend) {
+        wrapLegend(legend);
+        legendReady = true;
+        update();
+        clearInterval(iv);
+      } else if (++tries > 80) {
+        clearInterval(iv);
+      }
+    }, 100);
+  });
+})();
+", key_subtype_json)))
+```
+
+```{r parcel-filter-js}
+if (isTRUE(params$show_parcels)) {
+  tags$script(HTML("
+(function() {
+  function onReady(cb) {
+    if (document.readyState !== 'loading') cb();
+    else document.addEventListener('DOMContentLoaded', cb);
+  }
+
+  function findLeafletWidget() {
+    if (typeof HTMLWidgets === 'undefined') return null;
+    var widgets = HTMLWidgets.findAll ? HTMLWidgets.findAll('.leaflet') : [];
+    for (var i = 0; i < widgets.length; i++) {
+      if (widgets[i] && widgets[i].getMap) {
+        var m = widgets[i].getMap();
+        if (m) return m;
+      }
+      if (widgets[i] && widgets[i].map) return widgets[i].map;
+    }
+    // Fallback: search any element with data-for-map or .leaflet
+    var els = document.querySelectorAll('.leaflet');
+    for (var j = 0; j < els.length; j++) {
+      var obj = HTMLWidgets.find ? HTMLWidgets.find('#' + els[j].id) : null;
+      if (obj) {
+        if (obj.getMap) return obj.getMap();
+        if (obj.map) return obj.map;
+      }
+    }
+    return null;
+  }
+
+  onReady(function() {
+    if (typeof crosstalk === 'undefined') return;
+    var fh = new crosstalk.FilterHandle('permits');
+    var ready = false;
+
+    function resolveLayer(entry) {
+      if (!entry) return null;
+      if (typeof entry.addTo === 'function') return entry;
+      if (entry.layer && typeof entry.layer.addTo === 'function') return entry.layer;
+      return null;
+    }
+
+    function applyFilter() {
+      var map = findLeafletWidget();
+      if (!map || !map.layerManager) return;
+      var byId = map.layerManager._byLayerId || {};
+      var keys = fh.filteredKeys;
+      var visible = null;
+      if (keys != null) {
+        visible = Object.create(null);
+        for (var i = 0; i < keys.length; i++) visible[keys[i]] = true;
+      }
+      Object.keys(byId).forEach(function(k) {
+        var sepIdx = k.indexOf('\\n');
+        var cat, rk;
+        if (sepIdx > -1) { cat = k.substring(0, sepIdx); rk = k.substring(sepIdx + 1); }
+        else if (k.indexOf('shape-') === 0) { cat = 'shape'; rk = k.substring(6); }
+        else return;
+        if (cat !== 'shape') return;
+        var layer = resolveLayer(byId[k]);
+        if (!layer) return;
+        var show = (visible == null || visible[rk]);
+        if (show) {
+          if (!map.hasLayer(layer)) layer.addTo(map);
+        } else {
+          if (map.hasLayer(layer)) map.removeLayer(layer);
+        }
+      });
+    }
+
+    fh.on('change', function() { if (ready) applyFilter(); });
+
+    var tries = 0;
+    var iv = setInterval(function() {
+      var map = findLeafletWidget();
+      if (map && map.layerManager) {
+        ready = true;
+        applyFilter();
+        clearInterval(iv);
+      } else if (++tries > 100) {
+        clearInterval(iv);
+      }
+    }, 100);
+  });
+})();
+  "))
+}
+```
+
+## Permit table
+
+```{r dt-table}
+roll_lookup <- if (!is.null(parcels_on_map)) {
+  parcels_on_map |>
+    sf::st_drop_geometry() |>
+    as_tibble() |>
+    select(.rowkey, roll_number)
+} else {
+  tibble(.rowkey = character(), roll_number = character())
+}
+
+dt_data <- permits |>
+  left_join(roll_lookup, by = ".rowkey") |>
+  mutate(issue_date = format(issue_date, "%Y-%m-%d")) |>
+  select(
+    `Issue date`    = issue_date,
+    `Sub-type`      = sub_type,
+    `Address`       = address,
+    `Neighbourhood` = neighbourhood_name,
+    `Status`        = status,
+    `Permit #`      = permit_number,
+    `Roll #`        = roll_number,
+    `Latitude`      = latitude,
+    `Longitude`     = longitude
+  )
+dt_sd <- SharedData$new(dt_data, key = permits$.rowkey, group = "permits")
+
+datatable(
+  dt_sd,
+  rownames   = FALSE,
+  filter     = "top",
+  extensions = c("Buttons"),
+  options = list(
+    order       = list(list(0, "desc")),
+    pageLength  = 25,
+    lengthMenu  = c(10, 25, 50, 100, 250),
+    dom         = "Bfrtip",
+    columnDefs  = list(
+      list(targets = 5:8, visible = FALSE)  # Permit #, Roll #, Lat, Lon hidden on screen
+    ),
+    buttons     = list(
+      list(extend = "copy",  text = "Copy",
+           exportOptions = list(columns = 0:8, modifier = list(search = "applied"))),
+      list(extend = "csv",   text = "Download CSV (filtered)",
+           filename = "wpg_nonres_new_permits_filtered",
+           exportOptions = list(columns = 0:8, modifier = list(search = "applied"))),
+      list(extend = "print", text = "Print")
+    ),
+    scrollX    = TRUE,
+    autoWidth  = TRUE,
+    drawCallback = DT::JS(
+      "function() {
+         var info = this.api().page.info();
+         var el = document.getElementById('count-shown');
+         if (el) el.textContent = info.recordsDisplay.toLocaleString();
+       }"
+    )
+  )
+)
+```
+
+## Download full dataset
+
+```{r download-button}
+permits |>
+  select(-.rowkey, -.popup, -street_number_num) |>
+  mutate(issue_date = format(issue_date, "%Y-%m-%d")) |>
+  download_this(
+    output_name      = sprintf("wpg_nonres_new_permits_%s", format(Sys.Date(), "%Y%m%d")),
+    output_extension = ".csv",
+    button_label     = "Download full dataset (CSV, unfiltered)",
+    button_type      = "primary",
+    has_icon         = TRUE,
+    icon             = "fa fa-download",
+    csv2             = FALSE
+  )
+```
+
+---
+
+::: {.small}
+Generated with [Quarto](https://quarto.org) · Data © City of Winnipeg, [Open Government Licence – Winnipeg](https://data.winnipeg.ca/open-data-licence). Report prepared by Jason M. Schellenberg, P. App, AACI.
+:::

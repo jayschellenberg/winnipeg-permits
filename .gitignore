@@ -1,0 +1,43 @@
+# Quarto intermediate artifacts — embedded in the .html already
+*_files/
+*.knit.md
+*.quarto_ipynb
+.quarto/
+
+# Permit + parcel RDS cache (recreated on render)
+.cache/
+
+# Private data folders (not meant for public deploy)
+NonResData/
+MFResData/
+MultiResData/
+
+# Cross-reference reports (depend on private sales data)
+*CrossRef.*
+
+# CSV exports from DT download buttons
+wpg_*_permits_filtered.csv
+
+# R / RStudio
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# Claude Code session state
+.claude/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# Local-only context docs
+HANDOFF.md
+
+# Tmp / backup files
+*.tmp
+*.bak
+HANDOFF.md.tmp.*
+
+# Local Vercel build output
+.vercel/

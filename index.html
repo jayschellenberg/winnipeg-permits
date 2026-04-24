@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Winnipeg Building Permits — JKS Consulting</title>
+  <style>
+    :root {
+      --fg: #1a202c;
+      --muted: #4a5568;
+      --accent: #c0392b;
+      --card-bg: #ffffff;
+      --card-border: #e2e8f0;
+      --page-bg: #f7fafc;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      color: var(--fg);
+      background: var(--page-bg);
+      line-height: 1.5;
+    }
+    .wrap { max-width: 960px; margin: 0 auto; padding: 48px 24px 64px; }
+    header h1 { margin: 0 0 6px; font-size: 30px; letter-spacing: -0.01em; }
+    header p { margin: 0; color: var(--muted); font-size: 16px; }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 20px;
+      margin-top: 32px;
+    }
+    .card {
+      display: block;
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 24px;
+      text-decoration: none;
+      color: inherit;
+      transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease;
+    }
+    .card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 18px rgba(0,0,0,.06);
+      border-color: var(--accent);
+    }
+    .card h2 { margin: 0 0 6px; font-size: 19px; color: var(--accent); }
+    .card p  { margin: 0; color: var(--muted); font-size: 14px; }
+    footer {
+      margin-top: 48px;
+      padding-top: 16px;
+      border-top: 1px solid var(--card-border);
+      font-size: 13px;
+      color: var(--muted);
+    }
+    footer a { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Winnipeg Building Permits</h1>
+      <p>Interactive reports on City of Winnipeg new-construction permits. Prepared by Jason M. Schellenberg, P. App, AACI.</p>
+    </header>
+
+    <section class="cards">
+      <a class="card" href="WpgNonResPermits.html">
+        <h2>Non-Residential Permits</h2>
+        <p>New-construction permits filed under the Non-Residential permit group — commercial, institutional, industrial. Map, filters, and CSV export.</p>
+      </a>
+      <a class="card" href="WpgMultiResPermits.html">
+        <h2>Multi-Residential Permits</h2>
+        <p>New-construction permits with more than two dwelling units — apartments, condominiums, multi-family. Map, filters, cluster/neighbourhood overlay, and CSV export.</p>
+      </a>
+    </section>
+
+    <footer>
+      Data &copy; City of Winnipeg,
+      <a href="https://data.winnipeg.ca/open-data-licence">Open Government Licence – Winnipeg</a>.
+      Reports refresh weekly.
+    </footer>
+  </div>
+</body>
+</html>
