@@ -366,31 +366,11 @@ tags$div(
     ),
     tags$div(
       class = "filter-item",
-      tags$div(
-        class = "form-group",
-        tags$label(class = "control-label", `for` = "f-cluster", "Cluster"),
-        tags$div(
-          tags$select(
-            id = "f-cluster",
-            multiple = "multiple",
-            style = "width: 100%;"
-          )
-        )
-      )
+      filter_select("f-cluster", "Cluster", sd, ~cluster, multiple = TRUE)
     ),
     tags$div(
       class = "filter-item",
-      tags$div(
-        class = "form-group",
-        tags$label(class = "control-label", `for` = "f-neighbourhood", "Neighbourhood"),
-        tags$div(
-          tags$select(
-            id = "f-neighbourhood",
-            multiple = "multiple",
-            style = "width: 100%;"
-          )
-        )
-      )
+      filter_select("f-neighbourhood", "Neighbourhood", sd, ~neighbourhood_name, multiple = TRUE)
     )
   ),
   tags$div(
@@ -513,17 +493,12 @@ tags$script(HTML(sprintf("
       }
     }
 
-    ['f-subtype', 'f-streetname'].forEach(function(id) {
+    ['f-subtype', 'f-streetname', 'f-cluster', 'f-neighbourhood'].forEach(function(id) {
       var sz = getSelectize(id);
       if (sz) sz.clear(true);
     });
 
     if (typeof window.__resetStreetnum === 'function') window.__resetStreetnum();
-
-    ['f-cluster', 'f-neighbourhood'].forEach(function(id) {
-      var sz = getSelectize(id);
-      if (sz) sz.clear(true);
-    });
 
     if (preselect && preselect.length) {
       var sub = getSelectize('f-subtype');
@@ -649,146 +624,6 @@ tags$script(HTML(sprintf("
   });
 })();
 ", streetnum_by_key_json)))
-```
-
-```{r dynamic-filters-js}
-key_hood_json <- jsonlite::toJSON(
-  setNames(as.list(permits$neighbourhood_name), permits$.rowkey),
-  auto_unbox = TRUE, na = "null"
-)
-all_hoods_json <- jsonlite::toJSON(
-  sort(unique(permits$neighbourhood_name[!is.na(permits$neighbourhood_name)]))
-)
-key_cluster_json <- jsonlite::toJSON(
-  setNames(as.list(permits$cluster), permits$.rowkey),
-  auto_unbox = TRUE, na = "null"
-)
-all_clusters_json <- jsonlite::toJSON(
-  sort(unique(permits$cluster[!is.na(permits$cluster)]))
-)
-tags$script(HTML(sprintf("
-(function() {
-  var keyToHood    = %s;
-  var allHoods     = %s;
-  var keyToCluster = %s;
-  var allClusters  = %s;
-
-  function onReady(cb) {
-    if (document.readyState !== 'loading') cb();
-    else document.addEventListener('DOMContentLoaded', cb);
-  }
-
-  function getFilterSet(group) {
-    if (typeof crosstalk === 'undefined') return null;
-    try {
-      var g = crosstalk.group(group);
-      if (g && g.var) {
-        var v = g.var('filter');
-        if (v && typeof v.get === 'function') {
-          var fs = v.get();
-          if (fs && fs._handles) return fs;
-        }
-      }
-      for (var k in g) {
-        if (g[k] && g[k]._handles) return g[k];
-      }
-    } catch (e) {}
-    return null;
-  }
-
-  function bindDynamicFilter(selectId, keyToValue, allValues) {
-    var fh = new crosstalk.FilterHandle('permits');
-    var ourId = String(fh._id);
-    var selectEl = document.getElementById(selectId);
-    if (!selectEl) return;
-
-    $(selectEl).selectize({
-      plugins: ['remove_button'],
-      maxItems: null,
-      options: allValues.map(function(v) { return { value: v, text: v }; }),
-      placeholder: 'All',
-      onChange: function(values) {
-        var vals = values || [];
-        if (!Array.isArray(vals)) vals = vals ? [vals] : [];
-        if (vals.length === 0) { fh.clear(); return; }
-        var want = Object.create(null);
-        vals.forEach(function(v) { want[v] = true; });
-        var matched = [];
-        for (var k in keyToValue) {
-          var vv = keyToValue[k];
-          if (vv != null && want[vv]) matched.push(k);
-        }
-        fh.set(matched);
-      }
-    });
-    var selectize = selectEl.selectize;
-
-    var suppress = false;
-    function updateAvailable() {
-      if (suppress) return;
-      var fs = getFilterSet('permits');
-      var otherKeys = null;
-      if (fs && fs._handles) {
-        for (var hid in fs._handles) {
-          if (hid === ourId) continue;
-          var hkeys = fs._handles[hid];
-          if (hkeys == null) continue;
-          var cur = Object.create(null);
-          for (var i = 0; i < hkeys.length; i++) cur[hkeys[i]] = true;
-          if (otherKeys == null) {
-            otherKeys = cur;
-          } else {
-            var next = Object.create(null);
-            for (var k in otherKeys) if (cur[k]) next[k] = true;
-            otherKeys = next;
-          }
-        }
-      } else {
-        var fk = fh.filteredKeys;
-        if (fk != null) {
-          otherKeys = Object.create(null);
-          for (var j = 0; j < fk.length; j++) otherKeys[fk[j]] = true;
-        }
-      }
-
-      var available = Object.create(null);
-      if (otherKeys == null) {
-        allValues.forEach(function(v) { available[v] = true; });
-      } else {
-        for (var k2 in otherKeys) {
-          var v2 = keyToValue[k2];
-          if (v2 != null) available[v2] = true;
-        }
-      }
-      var curSel = selectize.getValue();
-      var selArr = Array.isArray(curSel) ? curSel : (curSel ? [curSel] : []);
-      selArr.forEach(function(v) { available[v] = true; });
-
-      suppress = true;
-      try {
-        Object.keys(selectize.options).forEach(function(v) {
-          if (!available[v]) selectize.removeOption(v, true);
-        });
-        Object.keys(available).forEach(function(v) {
-          if (!selectize.options[v]) selectize.addOption({ value: v, text: v });
-        });
-        selectize.refreshOptions(false);
-      } finally {
-        suppress = false;
-      }
-    }
-
-    fh.on('change', updateAvailable);
-    updateAvailable();
-  }
-
-  onReady(function() {
-    if (typeof crosstalk === 'undefined' || typeof $ === 'undefined') return;
-    bindDynamicFilter('f-cluster',       keyToCluster, allClusters);
-    bindDynamicFilter('f-neighbourhood', keyToHood,    allHoods);
-  });
-})();
-", key_hood_json, all_hoods_json, key_cluster_json, all_clusters_json)))
 ```
 
 ## Map
