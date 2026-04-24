@@ -482,10 +482,13 @@ tags$script(HTML(sprintf("
       }
     }
 
-    // Crosstalk-native selectize widgets
+    // Crosstalk-native selectize widgets.
+    // silent=false so selectize fires its change event, which is what
+    // crosstalk's FilterHandle listens for. With silent=true the widget
+    // empties visually but the filter stays applied.
     ['f-subtype', 'f-streetname', 'f-cluster', 'f-neighbourhood'].forEach(function(id) {
       var sz = getSelectize(id);
-      if (sz) sz.clear(true);
+      if (sz) sz.clear(false);
     });
 
     // Street number From/To inputs
