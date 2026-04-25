@@ -388,10 +388,6 @@ tags$div(
     tags$div(
       class = "filter-item",
       filter_select("f-cluster", "Cluster", sd, ~cluster, multiple = TRUE)
-    ),
-    tags$div(
-      class = "filter-item",
-      filter_select("f-neighbourhood", "Neighbourhood", sd, ~neighbourhood_name, multiple = TRUE)
     )
   ),
   tags$div(
@@ -494,7 +490,7 @@ tags$script(HTML(sprintf("
     if (typeof window.__clearAllExceptYear === 'function') {
       window.__clearAllExceptYear();
     } else {
-      ['f-subtype', 'f-streetname', 'f-cluster', 'f-neighbourhood'].forEach(function(id) {
+      ['f-subtype', 'f-streetname', 'f-cluster'].forEach(function(id) {
         var sz = getSelectize(id);
         if (sz) sz.clear(false);
       });
@@ -711,8 +707,7 @@ tags$script(HTML(sprintf("
   var WIDGETS = [
     { id: 'f-subtype',       key: 'subtype'    },
     { id: 'f-streetname',    key: 'streetname' },
-    { id: 'f-cluster',       key: 'cluster'    },
-    { id: 'f-neighbourhood', key: 'hood'       }
+    { id: 'f-cluster',       key: 'cluster'    }
   ];
 
   var suppressNarrow = false;
@@ -951,12 +946,12 @@ if (!is.null(clusters_sf) && nrow(clusters_sf) > 0) {
     addPolygons(
       data        = clusters_sf,
       group       = "Clusters",
-      color       = "#c05621", weight = 2.25, opacity = 0.85,
-      fillColor   = "#c05621", fillOpacity = 0.04,
+      color       = "#2563eb", weight = 1.75, opacity = 0.85,
+      fillColor   = "#3b82f6", fillOpacity = 0.07,
       smoothFactor = 0.5,
       highlightOptions = highlightOptions(
-        weight = 3.5, color = "#7b341e",
-        fillOpacity = 0.12, bringToFront = FALSE
+        weight = 2.75, color = "#1d4ed8",
+        fillOpacity = 0.14, bringToFront = FALSE
       ),
       label = ~cluster,
       popup = ~paste0("<b>Cluster:</b> ", htmlEscape(cluster)),
@@ -999,10 +994,7 @@ map_widget |>
   ) |>
   addFullscreenControl() |>
   addScaleBar(position = "bottomleft") |>
-  (\(m) {
-    if (!is.null(clusters_sf) && nrow(clusters_sf) > 0) m <- hideGroup(m, "Clusters")
-    m
-  })()
+  (\(m) m)()
 ```
 
 ```{r legend-filter-js}
