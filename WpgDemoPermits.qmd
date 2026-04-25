@@ -1,5 +1,5 @@
 ---
-title: "Winnipeg New Construction Permits (Multi-Residential)"
+title: "Winnipeg Demolition Permits"
 author: "Jason M. Schellenberg, P. App, AACI"
 date: today
 format:
@@ -12,11 +12,10 @@ format:
     smooth-scroll: true
     page-layout: full
 params:
-  default_since_year: 2015
+  default_since_year: 2020
   subtype_preselect: null   # OPTIONAL - null or YAML list of sub_type values to pre-select
   show_parcels: true
-  show_neighbourhoods: true # toggle the neighbourhood boundary overlay layer (off by default in Layers control)
-  min_units: 3              # included in the pre-selected slider range; full dataset is still fetched
+  show_neighbourhoods: true # toggle the cluster + neighbourhood boundary overlay layers (off by default in Layers control)
 knitr:
   opts_chunk:
     message: false
@@ -49,19 +48,21 @@ if (!is.null(subtypes_param)) {
 }
 if (length(subtypes_param) == 0) subtypes_param <- NULL
 default_since_year <- as.integer(params$default_since_year)
-min_units_param    <- as.integer(params$min_units)
 
 # ---- Query ----
-# Multi-residential = Residential + Construct New + (dwelling_units_created > 2 OR NULL).
-# The `> '2'` string-comparison form matches the user-supplied SoQL. Because SoQL
-# coerces the RHS for numeric columns this works at the API level for integer units.
+# Demolition permits = work_type in {Demolish, Demolition / Construct},
+# excluding Accessory Structures (sheds, garages, fences) but keeping rows
+# where permit_type is NULL.
 render_date_iso <- format(Sys.Date(), "%Y-%m-%d")
+
+work_types_soql <- "(work_type = 'Demolish' OR work_type = 'Demolition / Construct')"
+permit_types_soql <- "((permit_type != 'Accessory Structures') OR permit_type IS NULL)"
+
 soql_parts <- c(
   "issue_date >= '2010-01-01'",
   sprintf("issue_date < '%s'", render_date_iso),
-  "(work_type = 'Construct New')",
-  "(permit_group = 'Residential')",
-  "((dwelling_units_created > '2') OR dwelling_units_created IS NULL)"
+  work_types_soql,
+  permit_types_soql
 )
 query_str <- paste(
   "SELECT *",
@@ -74,7 +75,7 @@ query_str <- paste(
 cache_dir <- ".cache"
 if (!dir.exists(cache_dir)) dir.create(cache_dir, recursive = TRUE)
 qhash <- substr(rlang::hash(query_str), 1, 10)
-cache_file <- file.path(cache_dir, paste0("permits_multires_", qhash, ".rds"))
+cache_file <- file.path(cache_dir, paste0("permits_demo_", qhash, ".rds"))
 fresh <- file.exists(cache_file) &&
   difftime(Sys.time(), file.info(cache_file)$mtime, units = "hours") < 24
 
@@ -94,6 +95,28 @@ if (fresh) {
 }
 
 # ---- Tidy ----
+ensure_col <- function(df, col, default = NA) {
+  if (!col %in% names(df)) df[[col]] <- default
+  df
+}
+
+# Coerce any flavour of "missing" — NA, empty string, "NULL", "null", "undefined",
+# whitespace-only — to a single labelled sentinel. Selectize otherwise renders
+# these as the literal word "undefined" in dropdown options.
+clean_text <- function(x, fallback = "(Unspecified)") {
+  x <- trimws(as.character(x))
+  bad <- is.na(x) | x == "" | tolower(x) %in% c("null", "undefined", "na")
+  x[bad] <- fallback
+  x
+}
+for (col in c("permit_group", "permit_type", "sub_type", "work_type", "address",
+              "street_number", "street_name", "applicant_business_name",
+              "neighbourhood_name", "ward", "status", "major_project",
+              "permit_number", "location.latitude", "location.longitude",
+              "issue_date")) {
+  permits_raw <- ensure_col(permits_raw, col, NA_character_)
+}
+
 permits <- permits_raw |>
   as_tibble() |>
   mutate(
@@ -102,11 +125,23 @@ permits <- permits_raw |>
     longitude               = suppressWarnings(as.numeric(location.longitude)),
     issue_year              = year(issue_date),
     street_number_num       = suppressWarnings(as.integer(str_extract(street_number, "^\\d+"))),
-    dwelling_units_created  = suppressWarnings(as.integer(dwelling_units_created))
+    # Selectize renders NA / null / "" as literal "undefined" in dropdowns.
+    # clean_text() collapses every flavour of missing into "(Unspecified)".
+    permit_type             = clean_text(permit_type),
+    sub_type                = clean_text(sub_type),
+    work_type               = clean_text(work_type),
+    neighbourhood_name      = clean_text(neighbourhood_name),
+    permit_group_raw        = clean_text(permit_group),
+    # Permit group is binary: Residential vs Non-Residential. If the API value
+    # is missing or off-list, derive it from permit_type — Housing and
+    # Multi-Residential are Residential, everything else is Non-Residential.
+    permit_group            = case_when(
+      permit_group_raw %in% c("Residential", "Non-Residential") ~ permit_group_raw,
+      permit_type      %in% c("Housing", "Multi-Residential")   ~ "Residential",
+      TRUE                                                      ~ "Non-Residential"
+    )
   ) |>
-  # filter_slider (ionRangeSlider) bails on non-numeric values in its JSON
-  # payload. Any permit without a parseable street number must get a numeric
-  # stand-in or the slider silently fails to initialise.
+  select(-permit_group_raw) |>
   mutate(
     street_number_num = ifelse(
       is.na(street_number_num),
@@ -120,20 +155,17 @@ permits <- permits_raw |>
   arrange(desc(issue_date)) |>
   mutate(.rowkey = as.character(row_number())) |>
   select(
-    .rowkey, sub_type, issue_date, issue_year, permit_number, address,
+    .rowkey, permit_group, permit_type, sub_type, work_type,
+    issue_date, issue_year, permit_number, address,
     street_number, street_number_num, street_name,
     applicant_business_name, neighbourhood_name, ward, status,
-    major_project, dwelling_units_created, latitude, longitude
+    major_project, latitude, longitude
   )
 
 total_n <- nrow(permits)
 years_available <- sort(unique(permits$issue_year))
-units_max <- suppressWarnings(max(permits$dwelling_units_created, na.rm = TRUE))
-if (!is.finite(units_max)) units_max <- 100L
 
 # ---- Cluster boundary layer (local file: WpgNeighbourhoodClusters.geojson) ----
-# 23 pre-dissolved WRHA neighbourhood-cluster polygons with a `cluster` property.
-# We spatial-join permits to this file so every record gets a `cluster` tag.
 clusters_sf   <- NULL
 clusters_file <- "WpgNeighbourhoodClusters.geojson"
 if (isTRUE(params$show_neighbourhoods) && file.exists(clusters_file)) {
@@ -148,6 +180,25 @@ if (isTRUE(params$show_neighbourhoods) && file.exists(clusters_file)) {
   )
 }
 
+# ---- Individual neighbourhood boundary layer (WpgNeighbourhoods.geojson) ----
+# Aligns with City of Winnipeg's Map of Neighbourhoods (iw67-pm65, ~235 polygons).
+hoods_sf   <- NULL
+hoods_file <- "WpgNeighbourhoods.geojson"
+if (isTRUE(params$show_neighbourhoods) && file.exists(hoods_file)) {
+  prev_s2 <- sf_use_s2(FALSE)
+  on.exit(sf_use_s2(prev_s2), add = TRUE)
+  hoods_sf <- tryCatch({
+    raw <- sf::read_sf(hoods_file, quiet = TRUE) |>
+      sf::st_zm(drop = TRUE) |>
+      sf::st_make_valid()
+    nm <- names(raw)
+    name_col <- intersect(c("Name", "name", "neighbourhood", "NEIGHBOUR", "NAME", "NEIGHBOURHO"), nm)[1]
+    if (is.na(name_col) || is.null(name_col)) name_col <- nm[1]
+    raw$.hood_name <- as.character(raw[[name_col]])
+    raw |> dplyr::select(.hood_name)
+  }, error = function(e) NULL)
+}
+
 # ---- Spatial join: assign cluster to every permit ----
 permits$cluster <- NA_character_
 if (!is.null(clusters_sf) && nrow(clusters_sf) > 0 &&
@@ -156,7 +207,7 @@ if (!is.null(clusters_sf) && nrow(clusters_sf) > 0 &&
   on.exit(sf_use_s2(prev_s2), add = TRUE)
   permits_pts <- permits |>
     filter(!is.na(latitude), !is.na(longitude)) |>
-    select(-cluster) |>  # avoid column name collision in st_join
+    select(-cluster) |>
     st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE)
   suppressWarnings(st_agr(clusters_sf) <- "constant")
   hood_join <- suppressMessages(
@@ -198,7 +249,7 @@ parcel_total_eligible <- sum(!is.na(permits$latitude) & !is.na(permits$longitude
 
 if (isTRUE(params$show_parcels) && parcel_total_eligible > 0) {
   parcel_endpoint <- "https://data.winnipeg.ca/resource/d4mq-wa44.geojson"
-  parcels_cache <- file.path(cache_dir, paste0("parcels_multires_", qhash, ".rds"))
+  parcels_cache <- file.path(cache_dir, paste0("parcels_demo_", qhash, ".rds"))
   parcels_fresh <- file.exists(parcels_cache) &&
     difftime(Sys.time(), file.info(parcels_cache)$mtime, units = "hours") < 168
 
@@ -208,7 +259,7 @@ if (isTRUE(params$show_parcels) && parcel_total_eligible > 0) {
     loc_unique <- permits |>
       filter(!is.na(latitude), !is.na(longitude)) |>
       distinct(latitude, longitude)
-    d <- 0.0015  # ~150 m buffer around each permit on centroid bbox
+    d <- 0.0015
     bbox_clauses <- sprintf(
       "(centroid_lat BETWEEN %.6f AND %.6f AND centroid_lon BETWEEN %.6f AND %.6f)",
       loc_unique$latitude - d, loc_unique$latitude + d,
@@ -251,12 +302,14 @@ if (isTRUE(params$show_parcels) && parcel_total_eligible > 0) {
       st_geometry(joined) <- st_geometry(parcels_sf)[idx]
       joined$.popup_parcel <- paste0(
         "<div style='font-family:sans-serif;font-size:12px;line-height:1.4;'>",
-        "<strong>", htmlEscape(joined$sub_type), "</strong><br/>",
+        "<strong>", htmlEscape(ifelse(is.na(joined$sub_type), joined$permit_type, joined$sub_type)), "</strong><br/>",
+        "<b>Permit group:</b> ", htmlEscape(ifelse(is.na(joined$permit_group), "—", joined$permit_group)), "<br/>",
+        "<b>Permit type:</b> ", htmlEscape(ifelse(is.na(joined$permit_type), "—", joined$permit_type)), "<br/>",
+        "<b>Work type:</b> ", htmlEscape(ifelse(is.na(joined$work_type), "—", joined$work_type)), "<br/>",
         "<b>Address:</b> ", htmlEscape(joined$address), "<br/>",
         "<b>Issued:</b> ", format(joined$issue_date, "%Y-%m-%d"), "<br/>",
         "<b>Permit #:</b> ", htmlEscape(joined$permit_number), "<br/>",
         "<b>Roll #:</b> ", htmlEscape(joined$roll_number), "<br/>",
-        "<b>Dwelling units:</b> ", htmlEscape(ifelse(is.na(joined$dwelling_units_created), "—", as.character(joined$dwelling_units_created))), "<br/>",
         "<b>Applicant:</b> ", htmlEscape(ifelse(is.na(joined$applicant_business_name), "—", joined$applicant_business_name)), "<br/>",
         "<b>Neighbourhood:</b> ", htmlEscape(ifelse(is.na(joined$neighbourhood_name), "—", joined$neighbourhood_name)), "<br/>",
         "<b>Cluster:</b> ", htmlEscape(ifelse(is.na(joined$cluster), "—", joined$cluster)), "<br/>",
@@ -272,7 +325,7 @@ if (isTRUE(params$show_parcels) && parcel_total_eligible > 0) {
 ```
 
 ::: {.callout-note appearance="simple"}
-**Data scope:** Building permits issued since **January 1, 2010** for **permit group = Residential**, **work type = Construct New**, and **dwelling units created > 2** (or null — to preserve legacy records where the field was not populated). Source: City of Winnipeg Open Data — [Building Permits (it4w-cpf4)](https://data.winnipeg.ca/Permits-Licenses/Building-Permits/it4w-cpf4). **`r data_source`**.`r if (isTRUE(params$show_parcels)) sprintf(" Parcel polygons joined from [Assessment Parcels (d4mq-wa44)](https://data.winnipeg.ca/Assessment-Taxation-Corporate/Assessment-Parcels/d4mq-wa44) — **%s of %s** permits matched (%.0f%%).", format(parcel_match_count, big.mark = ","), format(parcel_total_eligible, big.mark = ","), 100 * parcel_match_count / max(parcel_total_eligible, 1))`
+**Data scope:** Building permits issued since **January 1, 2010** with **work type = Demolish or Demolition / Construct**, excluding the *Accessory Structures* permit type (sheds, garages, fences). Source: City of Winnipeg Open Data — [Building Permits (it4w-cpf4)](https://data.winnipeg.ca/Permits-Licenses/Building-Permits/it4w-cpf4). **`r data_source`**.`r if (isTRUE(params$show_parcels)) sprintf(" Parcel polygons joined from [Assessment Parcels (d4mq-wa44)](https://data.winnipeg.ca/Assessment-Taxation-Corporate/Assessment-Parcels/d4mq-wa44) — **%s of %s** permits matched (%.0f%%).", format(parcel_match_count, big.mark = ","), format(parcel_total_eligible, big.mark = ","), 100 * parcel_match_count / max(parcel_total_eligible, 1))`
 :::
 
 ```{r prefilter-notice, results='asis'}
@@ -354,6 +407,14 @@ tags$div(
     ),
     tags$div(
       class = "filter-item",
+      filter_select("f-permitgroup", "Permit group", sd, ~permit_group, multiple = TRUE)
+    ),
+    tags$div(
+      class = "filter-item",
+      filter_select("f-permittype", "Permit type", sd, ~permit_type, multiple = TRUE)
+    ),
+    tags$div(
+      class = "filter-item",
       filter_select("f-subtype", "Sub-type", sd, ~sub_type, multiple = TRUE)
     ),
     tags$div(
@@ -370,7 +431,7 @@ tags$div(
           inputmode = "numeric", min = 0, step = 1,
           class = "streetnum-input", placeholder = "From"
         ),
-        tags$span(class = "streetnum-sep", "\u2013"),
+        tags$span(class = "streetnum-sep", "–"),
         tags$input(
           id = "f-streetnum-to", type = "number",
           inputmode = "numeric", min = 0, step = 1,
@@ -380,14 +441,11 @@ tags$div(
     ),
     tags$div(
       class = "filter-item",
-      filter_slider(
-        "f-units", "Dwelling units created", sd, ~dwelling_units_created,
-        step = 1, round = TRUE, ticks = FALSE, sep = ""
-      )
+      filter_select("f-cluster", "Cluster", sd, ~cluster, multiple = TRUE)
     ),
     tags$div(
       class = "filter-item",
-      filter_select("f-cluster", "Cluster", sd, ~cluster, multiple = TRUE)
+      filter_select("f-hood", "Neighbourhood", sd, ~neighbourhood_name, multiple = TRUE)
     )
   ),
   tags$div(
@@ -447,88 +505,19 @@ tags$script(HTML(sprintf("
 ```
 
 ```{r reset-filters-js}
-preselect_json_for_reset <- if (!is.null(subtypes_param)) {
-  jsonlite::toJSON(subtypes_param)
-} else {
-  "null"
-}
-tags$script(HTML(sprintf("
+# Reset = full page reload. Crosstalk's filter_select widgets keep enough
+# internal state (selectize options, filter handles, dynamic-narrow caches)
+# that a logical "wipe and re-narrow" doesn't always match the just-loaded
+# state — so we just reload, which is what the user expects anyway.
+tags$script(HTML("
 (function() {
-  var defaultYear = %d;
-  var preselect   = %s;
-
-  function getSelectize(containerId) {
-    var c = document.getElementById(containerId);
-    if (!c) return null;
-    var sel = (c.tagName === 'SELECT') ? c : c.querySelector('select');
-    return (sel && sel.selectize) ? sel.selectize : null;
-  }
-  function resetSlider(containerId) {
-    var c = document.getElementById(containerId);
-    if (!c) return;
-    var input = c.querySelector('input.js-range-slider');
-    if (!input) return;
-    if (typeof $ !== 'undefined') {
-      var inst = $(input).data('ionRangeSlider');
-      if (inst && typeof inst.reset === 'function') inst.reset();
-    }
-  }
-
   window.__resetFilters = function() {
-    // Year dropdown
-    var yearSel = document.getElementById('year-filter');
-    if (yearSel) {
-      yearSel.value = String(defaultYear);
-      if (typeof window.__applyYearFilter === 'function') {
-        window.__applyYearFilter(yearSel.value);
-      }
-    }
-
-    // clearAllExceptYear wipes every filter_select, the streetnum From/To
-    // boxes, AND the dwelling-units slider under a suppression flag so
-    // narrowAll doesn't cascade mid-clear.
-    if (typeof window.__clearAllExceptYear === 'function') {
-      window.__clearAllExceptYear();
-    } else {
-      ['f-subtype', 'f-streetname', 'f-cluster'].forEach(function(id) {
-        var sz = getSelectize(id);
-        if (sz) sz.clear(false);
-      });
-      if (typeof window.__resetStreetnum === 'function') window.__resetStreetnum();
-      resetSlider('f-units');
-    }
-
-    // Re-narrow dropdown options based on the (now reset) filter state —
-    // keeps options consistent with what the user sees before any preselect.
-    if (typeof window.__narrowAll === 'function') {
-      window.__narrowAll();
-    }
-
-    // Re-apply sub-type pre-selection if configured
-    if (preselect && preselect.length) {
-      var sub = getSelectize('f-subtype');
-      if (sub) sub.setValue(preselect, false);
-    }
-
-    // Clear DT global + column search boxes and redraw
-    if (typeof $ !== 'undefined' && $.fn && $.fn.DataTable) {
-      $('table.dataTable').each(function() {
-        try {
-          var api = $(this).DataTable();
-          api.search('');
-          api.columns().search('');
-          api.draw();
-        } catch (e) {}
-      });
-    }
-
-    // Reset leaflet map view to the initial bounds captured on load
-    if (typeof window.__resetLeafletView === 'function') {
-      window.__resetLeafletView();
+    if (typeof location !== 'undefined' && location.reload) {
+      location.reload();
     }
   };
 })();
-", default_since_year, preselect_json_for_reset)))
+"))
 ```
 
 ```{r map-reset-init-js}
@@ -659,55 +648,59 @@ tags$script(HTML(sprintf("
 ```
 
 ```{r interactive-narrow-js}
-# Per-rowkey payloads for MUTUAL narrowing. Every dropdown narrows its visible
-# options to values that still exist in the intersection of (year floor) + all
-# OTHER active filter selections + streetnum range + dwelling-units range.
-# Year is primary — a year change wipes every other filter before re-narrowing.
-key_subtype_n    <- jsonlite::toJSON(
+key_subtype_n     <- jsonlite::toJSON(
   setNames(as.list(permits$sub_type),           permits$.rowkey),
   auto_unbox = TRUE, na = "null"
 )
-key_streetname_n <- jsonlite::toJSON(
+key_streetname_n  <- jsonlite::toJSON(
   setNames(as.list(permits$street_name),        permits$.rowkey),
   auto_unbox = TRUE, na = "null"
 )
-key_cluster_n    <- jsonlite::toJSON(
+key_cluster_n     <- jsonlite::toJSON(
   setNames(as.list(permits$cluster),            permits$.rowkey),
   auto_unbox = TRUE, na = "null"
 )
-key_hood_n       <- jsonlite::toJSON(
+key_hood_n        <- jsonlite::toJSON(
   setNames(as.list(permits$neighbourhood_name), permits$.rowkey),
   auto_unbox = TRUE, na = "null"
 )
-key_year_n       <- jsonlite::toJSON(
+key_permitgroup_n <- jsonlite::toJSON(
+  setNames(as.list(permits$permit_group),       permits$.rowkey),
+  auto_unbox = TRUE, na = "null"
+)
+key_permittype_n  <- jsonlite::toJSON(
+  setNames(as.list(permits$permit_type),        permits$.rowkey),
+  auto_unbox = TRUE, na = "null"
+)
+key_year_n        <- jsonlite::toJSON(
   setNames(as.integer(permits$issue_year),      permits$.rowkey),
   auto_unbox = TRUE, na = "null"
 )
-key_streetnum_n  <- jsonlite::toJSON(
+key_streetnum_n   <- jsonlite::toJSON(
   setNames(as.list(permits$street_number_num),  permits$.rowkey),
-  auto_unbox = TRUE, na = "null"
-)
-key_units_n      <- jsonlite::toJSON(
-  setNames(as.list(permits$dwelling_units_created), permits$.rowkey),
   auto_unbox = TRUE, na = "null"
 )
 
 tags$script(HTML(sprintf("
 (function() {
   var KEY = {
-    subtype:    %s,
-    streetname: %s,
-    cluster:    %s,
-    hood:       %s,
-    year:       %s,
-    streetnum:  %s,
-    units:      %s
+    subtype:     %s,
+    streetname:  %s,
+    cluster:     %s,
+    hood:        %s,
+    permitgroup: %s,
+    permittype:  %s,
+    year:        %s,
+    streetnum:   %s
   };
 
   var WIDGETS = [
-    { id: 'f-subtype',       key: 'subtype'    },
-    { id: 'f-streetname',    key: 'streetname' },
-    { id: 'f-cluster',       key: 'cluster'    }
+    { id: 'f-permitgroup',   key: 'permitgroup' },
+    { id: 'f-permittype',    key: 'permittype'  },
+    { id: 'f-subtype',       key: 'subtype'     },
+    { id: 'f-streetname',    key: 'streetname'  },
+    { id: 'f-cluster',       key: 'cluster'     },
+    { id: 'f-hood',          key: 'hood'        }
   ];
 
   var suppressNarrow = false;
@@ -756,20 +749,6 @@ tags$script(HTML(sprintf("
     return { lo: lo, hi: hi };
   }
 
-  function currentUnitsRange() {
-    var c = document.getElementById('f-units');
-    if (!c || typeof $ === 'undefined') return null;
-    var input = c.querySelector('input.js-range-slider');
-    if (!input) return null;
-    var inst = $(input).data('ionRangeSlider');
-    if (!inst || !inst.result) return null;
-    var r = inst.result;
-    // Slider at full extent = no active filter
-    if (r.from === r.min && r.to === r.max) return null;
-    return { lo: r.from, hi: r.to };
-  }
-
-  // Rowkeys matching year + every active filter EXCEPT excludeWidgetId.
   function rowkeysMatching(excludeWidgetId) {
     var minYear = currentYear();
     var filters = [];
@@ -779,7 +758,6 @@ tags$script(HTML(sprintf("
       if (sel) filters.push({ key: w.key, set: sel });
     });
     var snRange = currentStreetnumRange();
-    var unRange = currentUnitsRange();
 
     var out = [];
     var yearMap = KEY.year;
@@ -796,13 +774,19 @@ tags$script(HTML(sprintf("
         var sv = KEY.streetnum[k];
         if (sv == null || sv < snRange.lo || sv > snRange.hi) continue;
       }
-      if (unRange) {
-        var uv = KEY.units[k];
-        if (uv == null || uv < unRange.lo || uv > unRange.hi) continue;
-      }
       out.push(k);
     }
     return out;
+  }
+
+  // Anything selectize might render as the literal word 'undefined'.
+  function isBadValue(v) {
+    if (v == null) return true;
+    if (typeof v !== 'string') return true;
+    var t = v.replace(/^\\s+|\\s+$/g, '');
+    if (t === '') return true;
+    var lc = t.toLowerCase();
+    return lc === 'undefined' || lc === 'null' || lc === 'na';
   }
 
   function narrowOne(widget) {
@@ -813,19 +797,23 @@ tags$script(HTML(sprintf("
     var keep = Object.create(null);
     for (var i = 0; i < rowkeys.length; i++) {
       var v = keyToValue[rowkeys[i]];
-      if (v != null) keep[v] = true;
+      if (isBadValue(v)) continue;
+      keep[v] = true;
     }
-    // Preserve current selection so selectize doesn't drop displayed items.
     var cur = sz.getValue();
     if (cur) {
       (Array.isArray(cur) ? cur : [cur]).forEach(function(v) {
-        if (v) keep[v] = true;
+        if (!isBadValue(v)) keep[v] = true;
       });
     }
+    // Sweep any junk options crosstalk's filter_select may have re-injected
+    // when an upstream filter fired (e.g., on year change or a permit_group
+    // selection), then reconcile against `keep`.
     Object.keys(sz.options).forEach(function(v) {
-      if (!keep[v]) sz.removeOption(v, true);
+      if (isBadValue(v) || !keep[v]) sz.removeOption(v, true);
     });
     Object.keys(keep).forEach(function(v) {
+      if (isBadValue(v)) return;
       if (!sz.options[v]) sz.addOption({ value: v, text: v });
     });
     sz.refreshOptions(false);
@@ -847,15 +835,6 @@ tags$script(HTML(sprintf("
       if (typeof window.__resetStreetnum === 'function') {
         window.__resetStreetnum();
       }
-      // Reset units slider
-      var uc = document.getElementById('f-units');
-      if (uc && typeof $ !== 'undefined') {
-        var ui = uc.querySelector('input.js-range-slider');
-        if (ui) {
-          var inst = $(ui).data('ionRangeSlider');
-          if (inst && typeof inst.reset === 'function') inst.reset();
-        }
-      }
     } finally {
       suppressNarrow = false;
     }
@@ -865,7 +844,6 @@ tags$script(HTML(sprintf("
   onReady(function() {
     var yearSel = document.getElementById('year-filter');
 
-    // Year is primary: changing it wipes every other filter, then re-narrows.
     if (yearSel) {
       yearSel.addEventListener('change', function() {
         clearOthers();
@@ -873,7 +851,6 @@ tags$script(HTML(sprintf("
       });
     }
 
-    // Streetnum From/To boxes trigger mutual narrowing.
     ['f-streetnum-from', 'f-streetnum-to'].forEach(function(id) {
       var el = document.getElementById(id);
       if (!el) return;
@@ -881,17 +858,6 @@ tags$script(HTML(sprintf("
       el.addEventListener('change', narrowAll);
     });
 
-    // Units slider: listen for crosstalk's change event on the hidden input.
-    var unitsContainer = document.getElementById('f-units');
-    if (unitsContainer) {
-      var unitsInput = unitsContainer.querySelector('input.js-range-slider');
-      if (unitsInput && typeof $ !== 'undefined') {
-        $(unitsInput).on('change', narrowAll);
-      }
-    }
-
-    // Wait for all selectize widgets to initialise, attach change hooks, then
-    // do the first narrow pass.
     var tries = 0;
     var iv = setInterval(function() {
       var ready = WIDGETS.every(function(w) { return getSelectizeFor(w.id); });
@@ -908,25 +874,31 @@ tags$script(HTML(sprintf("
     }, 100);
   });
 })();
-", key_subtype_n, key_streetname_n, key_cluster_n, key_hood_n, key_year_n, key_streetnum_n, key_units_n)))
+", key_subtype_n, key_streetname_n, key_cluster_n, key_hood_n, key_permitgroup_n, key_permittype_n, key_year_n, key_streetnum_n)))
 ```
 
 ## Map
 
 ```{r map}
-pal <- colorFactor(palette = "viridis", domain = sort(unique(permits$sub_type)))
-
-subtype_with_units <- function(st, units) {
-  ifelse(is.na(units), st, sprintf("%s (%d units)", st, units))
-}
+# Color by permit_group — cleaner legend than sub_type for this mixed dataset.
+# Set1 palette pinned by name so Residential and Non-Residential always get
+# the same colours regardless of which is alphabetically first.
+permit_group_levels <- sort(unique(permits$permit_group))
+pal <- colorFactor(
+  palette = c("Residential" = "#e41a1c", "Non-Residential" = "#377eb8"),
+  domain  = permit_group_levels,
+  na.color = "#9ca3af"
+)
 
 popup_html <- paste0(
   "<div style='font-family:sans-serif;font-size:12px;line-height:1.4;'>",
-  "<strong>", htmlEscape(permits$sub_type), "</strong><br/>",
+  "<strong>", htmlEscape(ifelse(is.na(permits$sub_type), permits$permit_type, permits$sub_type)), "</strong><br/>",
+  "<b>Permit group:</b> ", htmlEscape(ifelse(is.na(permits$permit_group), "—", permits$permit_group)), "<br/>",
+  "<b>Permit type:</b> ", htmlEscape(ifelse(is.na(permits$permit_type), "—", permits$permit_type)), "<br/>",
+  "<b>Work type:</b> ", htmlEscape(ifelse(is.na(permits$work_type), "—", permits$work_type)), "<br/>",
   "<b>Address:</b> ", htmlEscape(permits$address), "<br/>",
   "<b>Issued:</b> ", format(permits$issue_date, "%Y-%m-%d"), "<br/>",
   "<b>Permit #:</b> ", htmlEscape(permits$permit_number), "<br/>",
-  "<b>Dwelling units:</b> ", htmlEscape(ifelse(is.na(permits$dwelling_units_created), "—", as.character(permits$dwelling_units_created))), "<br/>",
   "<b>Applicant:</b> ", htmlEscape(ifelse(is.na(permits$applicant_business_name), "—", permits$applicant_business_name)), "<br/>",
   "<b>Neighbourhood:</b> ", htmlEscape(ifelse(is.na(permits$neighbourhood_name), "—", permits$neighbourhood_name)), "<br/>",
   "<b>Cluster:</b> ", htmlEscape(ifelse(is.na(permits$cluster), "—", permits$cluster)), "<br/>",
@@ -959,52 +931,74 @@ if (!is.null(clusters_sf) && nrow(clusters_sf) > 0) {
     )
 }
 
+if (!is.null(hoods_sf) && nrow(hoods_sf) > 0) {
+  map_widget <- map_widget |>
+    addPolygons(
+      data        = hoods_sf,
+      group       = "Neighbourhoods",
+      color       = "#b45309", weight = 1, opacity = 0.7,
+      fillColor   = "#f59e0b", fillOpacity = 0.04,
+      smoothFactor = 0.5,
+      highlightOptions = highlightOptions(
+        weight = 2, color = "#92400e",
+        fillOpacity = 0.12, bringToFront = FALSE
+      ),
+      label = ~.hood_name,
+      popup = ~paste0("<b>Neighbourhood:</b> ", htmlEscape(.hood_name)),
+      options = pathOptions(pane = "overlayPane", interactive = TRUE)
+    )
+}
+
 if (!is.null(parcels_on_map) && nrow(parcels_on_map) > 0) {
   map_widget <- map_widget |>
     addPolygons(
       data = parcels_on_map,
       layerId = ~.rowkey,
-      color = ~pal(sub_type), fillColor = ~pal(sub_type),
+      color = ~pal(permit_group), fillColor = ~pal(permit_group),
       fillOpacity = 0.25, weight = 1.5, opacity = 0.9,
       popup = ~.popup_parcel,
-      label = ~paste0(subtype_with_units(sub_type, dwelling_units_created), " — ", address, " (", issue_year, ") — ", ifelse(is.na(neighbourhood_name), "—", neighbourhood_name), " / ", ifelse(is.na(cluster), "—", cluster))
+      label = ~paste0(ifelse(is.na(sub_type), permit_type, sub_type), " — ", address, " (", issue_year, ") — ", ifelse(is.na(neighbourhood_name), "—", neighbourhood_name), " / ", ifelse(is.na(cluster), "—", cluster))
     )
 }
 
 map_widget |>
   addCircleMarkers(
     lng = ~longitude, lat = ~latitude,
-    color = ~pal(sub_type), fillColor = ~pal(sub_type),
+    color = ~pal(permit_group), fillColor = ~pal(permit_group),
     fillOpacity = 0.85, stroke = TRUE, weight = 1, opacity = 1,
     radius = 6,
     popup = ~.popup,
-    label = ~paste0(subtype_with_units(sub_type, dwelling_units_created), " — ", address, " (", issue_year, ")")
+    label = ~paste0(ifelse(is.na(sub_type), permit_type, sub_type), " — ", address, " (", issue_year, ")")
   ) |>
   addLegend(
     position = "bottomright", pal = pal,
-    values = sort(unique(permits$sub_type)),
-    title = "Sub-type", opacity = 0.9
+    values = sort(unique(permits$permit_group)),
+    title = "Permit group", opacity = 0.9
   ) |>
   addLayersControl(
     baseGroups    = c("Light", "Satellite", "OSM"),
     overlayGroups = c(
-      if (!is.null(clusters_sf) && nrow(clusters_sf) > 0) "Clusters"
+      if (!is.null(clusters_sf) && nrow(clusters_sf) > 0) "Clusters",
+      if (!is.null(hoods_sf)    && nrow(hoods_sf)    > 0) "Neighbourhoods"
     ),
     options       = layersControlOptions(collapsed = TRUE)
   ) |>
+  hideGroup(c(
+    if (!is.null(hoods_sf) && nrow(hoods_sf) > 0) "Neighbourhoods"
+  )) |>
   addFullscreenControl() |>
   addScaleBar(position = "bottomleft") |>
   (\(m) m)()
 ```
 
 ```{r legend-filter-js}
-key_subtype_json <- jsonlite::toJSON(
-  setNames(as.list(permits$sub_type), permits$.rowkey),
+key_permitgroup_json <- jsonlite::toJSON(
+  setNames(as.list(permits$permit_group), permits$.rowkey),
   auto_unbox = TRUE
 )
 tags$script(HTML(sprintf("
 (function() {
-  var keyToSubtype = %s;
+  var keyToPermitGroup = %s;
 
   function onReady(cb) {
     if (document.readyState !== 'loading') cb();
@@ -1056,8 +1050,8 @@ tags$script(HTML(sprintf("
       if (keys != null) {
         visible = Object.create(null);
         for (var i = 0; i < keys.length; i++) {
-          var st = keyToSubtype[keys[i]];
-          if (st) visible[st] = true;
+          var pg = keyToPermitGroup[keys[i]];
+          if (pg) visible[pg] = true;
         }
       }
       var entries = legend.querySelectorAll('.legend-entry');
@@ -1083,7 +1077,7 @@ tags$script(HTML(sprintf("
     }, 100);
   });
 })();
-", key_subtype_json)))
+", key_permitgroup_json)))
 ```
 
 ```{r parcel-filter-js}
@@ -1192,9 +1186,11 @@ dt_data <- permits |>
   mutate(issue_date = format(issue_date, "%Y-%m-%d")) |>
   select(
     `Issue date`    = issue_date,
+    `Permit group`  = permit_group,
+    `Permit type`   = permit_type,
     `Sub-type`      = sub_type,
+    `Work type`     = work_type,
     `Address`       = address,
-    `Units`         = dwelling_units_created,
     `Neighbourhood` = neighbourhood_name,
     `Cluster`       = cluster,
     `Status`        = status,
@@ -1216,14 +1212,14 @@ datatable(
     lengthMenu  = c(10, 25, 50, 100, 250),
     dom         = "Bfrtip",
     columnDefs  = list(
-      list(targets = 7:10, visible = FALSE)  # Permit #, Roll #, Lat, Lon hidden on screen
+      list(targets = 9:12, visible = FALSE)  # Permit #, Roll #, Lat, Lon hidden on screen
     ),
     buttons     = list(
       list(extend = "copy",  text = "Copy",
-           exportOptions = list(columns = 0:10, modifier = list(search = "applied"))),
+           exportOptions = list(columns = 0:12, modifier = list(search = "applied"))),
       list(extend = "csv",   text = "Download CSV (filtered)",
-           filename = "wpg_multires_new_permits_filtered",
-           exportOptions = list(columns = 0:10, modifier = list(search = "applied"))),
+           filename = "wpg_demo_permits_filtered",
+           exportOptions = list(columns = 0:12, modifier = list(search = "applied"))),
       list(extend = "print", text = "Print")
     ),
     scrollX    = TRUE,
@@ -1246,7 +1242,7 @@ permits |>
   select(-.rowkey, -.popup, -street_number_num) |>
   mutate(issue_date = format(issue_date, "%Y-%m-%d")) |>
   download_this(
-    output_name      = sprintf("wpg_multires_new_permits_%s", format(Sys.Date(), "%Y%m%d")),
+    output_name      = sprintf("wpg_demo_permits_%s", format(Sys.Date(), "%Y%m%d")),
     output_extension = ".csv",
     button_label     = "Download full dataset (CSV, unfiltered)",
     button_type      = "primary",

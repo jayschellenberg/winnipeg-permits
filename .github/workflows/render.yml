@@ -12,7 +12,9 @@ on:
     paths:
       - "WpgNonResPermits.qmd"
       - "WpgMultiResPermits.qmd"
+      - "WpgDemoPermits.qmd"
       - "WpgNeighbourhoods.geojson"
+      - "WpgNeighbourhoodClusters.geojson"
       - "index.html"
       - ".github/workflows/render.yml"
 
@@ -79,11 +81,14 @@ jobs:
       - name: Render Multi-Residential report
         run: quarto render WpgMultiResPermits.qmd
 
+      - name: Render Demolition report
+        run: quarto render WpgDemoPermits.qmd
+
       - name: Commit rendered HTML
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add WpgNonResPermits.html WpgMultiResPermits.html
+          git add WpgNonResPermits.html WpgMultiResPermits.html WpgDemoPermits.html
           if git diff --cached --quiet; then
             echo "No HTML changes."
           else

@@ -264,7 +264,7 @@ if (isTRUE(params$show_parcels) && parcel_total_eligible > 0) {
 ```
 
 ::: {.callout-note appearance="simple"}
-**Data scope:** Building permits issued since **January 1, 2010** for **permit group = Non-Residential** and **work type = Construct New**. Source: City of Winnipeg Open Data — [Building Permits (it4w-cpf4)](https://data.winnipeg.ca/Permits-Licenses/Building-Permits/it4w-cpf4). **`r data_source`**. Cache refreshes automatically after 24 hours.`r if (isTRUE(params$show_parcels)) sprintf(" Parcel polygons joined from [Assessment Parcels (d4mq-wa44)](https://data.winnipeg.ca/Assessment-Taxation-Corporate/Assessment-Parcels/d4mq-wa44) — **%s of %s** permits matched (%.0f%%).", format(parcel_match_count, big.mark = ","), format(parcel_total_eligible, big.mark = ","), 100 * parcel_match_count / max(parcel_total_eligible, 1))`
+**Data scope:** Building permits issued since **January 1, 2010** for **permit group = Non-Residential** and **work type = Construct New**. Source: City of Winnipeg Open Data — [Building Permits (it4w-cpf4)](https://data.winnipeg.ca/Permits-Licenses/Building-Permits/it4w-cpf4). **`r data_source`**.`r if (isTRUE(params$show_parcels)) sprintf(" Parcel polygons joined from [Assessment Parcels (d4mq-wa44)](https://data.winnipeg.ca/Assessment-Taxation-Corporate/Assessment-Parcels/d4mq-wa44) — **%s of %s** permits matched (%.0f%%).", format(parcel_match_count, big.mark = ","), format(parcel_total_eligible, big.mark = ","), 100 * parcel_match_count / max(parcel_total_eligible, 1))`
 :::
 
 ```{r prefilter-notice, results='asis'}
