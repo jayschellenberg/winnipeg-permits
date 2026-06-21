@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 concurrency:
   group: render-${{ github.ref }}
@@ -95,3 +96,60 @@ jobs:
             git commit -m "chore(render): auto-rebuild reports ($(date -u +%Y-%m-%d))"
             git push
           fi
+
+      # --- Failure notification (mirrors the cmhc-charts pattern) ---------
+      # The email step self-skips until MAIL_USERNAME/MAIL_PASSWORD secrets +
+      # MAIL_TO var are set on this repo (default SMTP is smtp.gmail.com:587 —
+      # override via SMTP_HOST/SMTP_PORT vars). The issue step always fires on
+      # failure using the auto-provided GITHUB_TOKEN.
+      - name: Email gate — failure
+        if: failure()
+        id: fail_email_gate
+        env:
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+          MAIL_TO:       ${{ vars.MAIL_TO }}
+        run: |
+          if [ -z "$MAIL_USERNAME" ] || [ -z "$MAIL_PASSWORD" ] || [ -z "$MAIL_TO" ]; then
+            echo "Email secrets/vars not configured — skipping notification."
+            echo "send=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "send=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Send failure email
+        if: failure() && steps.fail_email_gate.outputs.send == 'true'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ vars.SMTP_HOST || 'smtp.gmail.com' }}
+          server_port:    ${{ vars.SMTP_PORT || 587 }}
+          secure:         true
+          username:       ${{ secrets.MAIL_USERNAME }}
+          password:       ${{ secrets.MAIL_PASSWORD }}
+          from:           Winnipeg Permits <${{ secrets.MAIL_USERNAME }}>
+          to:             ${{ vars.MAIL_TO }}
+          subject:        "[Winnipeg Permits] Render FAILED — run ${{ github.run_id }}"
+          body: |
+            The scheduled Quarto render workflow FAILED.
+
+            Trigger:  ${{ github.event_name }}
+            Run log:  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            Commit:   ${{ github.sha }}
+
+            Vercel will not see new HTML until this is fixed and re-run.
+
+      - name: Open issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "Render failed ($(date -u +%Y-%m-%d))" \
+            --body "The scheduled \`Render Quarto reports\` workflow failed.
+
+          - Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          - Trigger: ${{ github.event_name }}
+          - Commit: ${{ github.sha }}
+
+          Likely causes: a transient CRAN/package install, the sf system-lib install, a Quarto render error, or a Winnipeg Open Data (Socrata) API change. Re-running often clears transient failures." \
+            || echo "issue create failed (duplicate or token scope) — continuing"
