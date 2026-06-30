@@ -119,7 +119,7 @@ jobs:
 
       - name: Send failure email
         if: failure() && steps.fail_email_gate.outputs.send == 'true'
-        uses: dawidd6/action-send-mail@v3
+        uses: dawidd6/action-send-mail@2cea9617b09d79a095af21254fbcb7ae95903dde # v3.12.0
         with:
           server_address: ${{ vars.SMTP_HOST || 'smtp.gmail.com' }}
           server_port:    ${{ vars.SMTP_PORT || 587 }}

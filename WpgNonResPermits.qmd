@@ -890,7 +890,7 @@ if (!is.null(clusters_sf) && nrow(clusters_sf) > 0) {
         weight = 2.75, color = "#1d4ed8",
         fillOpacity = 0.14, bringToFront = FALSE
       ),
-      label = ~cluster,
+      label = ~htmlEscape(cluster),
       popup = ~paste0("<b>Cluster:</b> ", htmlEscape(cluster)),
       options = pathOptions(pane = "overlayPane", interactive = TRUE)
     )
@@ -904,7 +904,7 @@ if (!is.null(parcels_on_map) && nrow(parcels_on_map) > 0) {
       color = ~pal(sub_type), fillColor = ~pal(sub_type),
       fillOpacity = 0.25, weight = 1.5, opacity = 0.9,
       popup = ~.popup_parcel,
-      label = ~paste0(sub_type, " — ", address, " (", issue_year, ") — ", ifelse(is.na(neighbourhood_name), "—", neighbourhood_name), " / ", ifelse(is.na(cluster), "—", cluster))
+      label = ~paste0(htmlEscape(sub_type), " — ", htmlEscape(address), " (", issue_year, ") — ", htmlEscape(ifelse(is.na(neighbourhood_name), "—", neighbourhood_name)), " / ", htmlEscape(ifelse(is.na(cluster), "—", cluster)))
     )
 }
 
@@ -915,7 +915,7 @@ map_widget |>
     fillOpacity = 0.85, stroke = TRUE, weight = 1, opacity = 1,
     radius = 6,
     popup = ~.popup,
-    label = ~paste0(sub_type, " — ", address, " (", issue_year, ")")
+    label = ~paste0(htmlEscape(sub_type), " — ", htmlEscape(address), " (", issue_year, ")")
   ) |>
   addLegend(
     position = "bottomright", pal = pal,
