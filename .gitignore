@@ -35,6 +35,10 @@ Thumbs.db
 # Local-only context docs
 HANDOFF.md
 
+# Unrelated local appraisal dashboard — not part of the published permits
+# site (contains hardcoded local paths). Kept locally, never deployed.
+LandV2.3.qmd
+
 # Tmp / backup files
 *.tmp
 *.bak
