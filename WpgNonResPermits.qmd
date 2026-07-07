@@ -308,8 +308,13 @@ tags$style(HTML("
 }
 .count-display strong { color: #c0392b; }
 .filter-reset-row {
-  display: flex; justify-content: flex-end; margin-top: 10px;
+  display: flex; justify-content: flex-start; margin-top: 10px;
 }
+.filter-streets-row {
+  display: flex; flex-wrap: wrap; gap: 12px 16px;
+  align-items: start; margin-top: 12px;
+}
+.filter-streets-row .filter-item { flex: 0 1 220px; }
 .btn-reset {
   padding: 6px 14px; border: 1px solid #c0392b; background: #ffffff;
   color: #c0392b; border-radius: 4px; font-size: 13px; font-weight: 600;
@@ -377,6 +382,13 @@ tags$div(
     ),
     tags$div(
       class = "filter-item",
+      filter_select("f-cluster", "Cluster", sd, ~cluster, multiple = TRUE)
+    )
+  ),
+  tags$div(
+    class = "filter-streets-row",
+    tags$div(
+      class = "filter-item",
       filter_select("f-streetname", "Street name", sd, ~street_name, multiple = TRUE)
     ),
     tags$div(
@@ -396,10 +408,6 @@ tags$div(
           class = "streetnum-input", placeholder = "To"
         )
       )
-    ),
-    tags$div(
-      class = "filter-item",
-      filter_select("f-cluster", "Cluster", sd, ~cluster, multiple = TRUE)
     )
   ),
   tags$div(
