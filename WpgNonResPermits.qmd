@@ -385,14 +385,14 @@ tags$div(
       tags$div(
         class = "streetnum-range",
         tags$input(
-          id = "f-streetnum-from", type = "number",
-          inputmode = "numeric", min = 0, step = 1,
+          id = "f-streetnum-from", type = "text",
+          inputmode = "numeric", pattern = "[0-9]*",
           class = "streetnum-input", placeholder = "From"
         ),
         tags$span(class = "streetnum-sep", "\u2013"),
         tags$input(
-          id = "f-streetnum-to", type = "number",
-          inputmode = "numeric", min = 0, step = 1,
+          id = "f-streetnum-to", type = "text",
+          inputmode = "numeric", pattern = "[0-9]*",
           class = "streetnum-input", placeholder = "To"
         )
       )
@@ -656,6 +656,19 @@ tags$script(HTML(sprintf("
     fromEl.addEventListener('change', apply);
     toEl.addEventListener('input',    apply);
     toEl.addEventListener('change',   apply);
+
+    // Single-address convenience: tabbing (or clicking) into an empty To box
+    // pre-fills it with the From value and highlights it, so it stays a single
+    // street number unless the user types a different upper bound.
+    toEl.addEventListener('focus', function() {
+      var fromVal = (fromEl.value || '').trim();
+      if (fromVal !== '' && (toEl.value || '').trim() === '') {
+        toEl.value = fromVal;
+        // Fire the same handlers a manual edit would: filter + dropdown narrow.
+        toEl.dispatchEvent(new Event('input', { bubbles: true }));
+        toEl.select();
+      }
+    });
 
     window.__resetStreetnum = function() {
       fromEl.value = '';
