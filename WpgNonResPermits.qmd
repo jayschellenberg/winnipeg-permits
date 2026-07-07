@@ -323,6 +323,32 @@ tags$style(HTML("
   font-size: 14px; background: white;
 }
 .streetnum-sep { color: #7a7f87; font-weight: 600; }
+
+/* Widen the main content area to fill the page. Quarto's full layout
+   reserves large flexible margin columns (and an empty right margin
+   sidebar), leaving the map/table/filters ~1075px on a 1920px screen.
+   Resizing the grid columns lets body-content take the free space. Scoped
+   to the lg breakpoint (>=992px) where Quarto uses its multi-column grid;
+   below that it collapses to a single column and must be left untouched. */
+@media (min-width: 992px) {
+  #quarto-content.page-columns.page-layout-full {
+    grid-template-columns:
+      [screen-start] 20px
+      [screen-start-inset] 10px
+      [page-start] 20px
+      [page-start-inset] 200px
+      [body-start-outset] 25px
+      [body-start] 25px
+      [body-content-start] minmax(0, 1fr)
+      [body-content-end] 25px
+      [body-end] 20px
+      [body-end-outset] 20px
+      [page-end-inset] 20px
+      [page-end] 10px
+      [screen-end-inset] 20px
+      [screen-end] !important;
+  }
+}
 "))
 ```
 
