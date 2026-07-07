@@ -95,6 +95,7 @@ permits <- permits_raw |>
   as_tibble() |>
   mutate(
     issue_date        = as_date(ymd_hms(issue_date, quiet = TRUE)),
+    final_date        = as_date(ymd_hms(final_date, quiet = TRUE)),
     latitude          = suppressWarnings(as.numeric(location.latitude)),
     longitude         = suppressWarnings(as.numeric(location.longitude)),
     issue_year        = year(issue_date),
@@ -116,7 +117,7 @@ permits <- permits_raw |>
   arrange(desc(issue_date)) |>
   mutate(.rowkey = as.character(row_number())) |>
   select(
-    .rowkey, sub_type, issue_date, issue_year, permit_number, address,
+    .rowkey, sub_type, issue_date, final_date, issue_year, permit_number, address,
     street_number, street_number_num, street_name,
     applicant_business_name, neighbourhood_name, ward, status,
     major_project, latitude, longitude
@@ -1127,18 +1128,23 @@ roll_lookup <- if (!is.null(parcels_on_map)) {
 
 dt_data <- permits |>
   left_join(roll_lookup, by = ".rowkey") |>
-  mutate(issue_date = format(issue_date, "%Y-%m-%d")) |>
+  mutate(
+    issue_date = format(issue_date, "%Y-%m-%d"),
+    final_date = format(final_date, "%Y-%m-%d")
+  ) |>
   select(
-    `Issue date`    = issue_date,
-    `Sub-type`      = sub_type,
-    `Address`       = address,
-    `Neighbourhood` = neighbourhood_name,
-    `Cluster`       = cluster,
-    `Status`        = status,
-    `Permit #`      = permit_number,
-    `Roll #`        = roll_number,
-    `Latitude`      = latitude,
-    `Longitude`     = longitude
+    `Issue date`              = issue_date,
+    `Sub-type`                = sub_type,
+    `Address`                 = address,
+    `Applicant business name` = applicant_business_name,
+    `Neighbourhood`           = neighbourhood_name,
+    `Cluster`                 = cluster,
+    `Status`                  = status,
+    `Final date`              = final_date,
+    `Permit #`                = permit_number,
+    `Roll #`                  = roll_number,
+    `Latitude`                = latitude,
+    `Longitude`               = longitude
   )
 dt_sd <- SharedData$new(dt_data, key = permits$.rowkey, group = "permits")
 
@@ -1153,14 +1159,14 @@ datatable(
     lengthMenu  = c(10, 25, 50, 100, 250),
     dom         = "Bfrtip",
     columnDefs  = list(
-      list(targets = 6:9, visible = FALSE)  # Permit #, Roll #, Lat, Lon hidden on screen
+      list(targets = 8:11, visible = FALSE)  # Permit #, Roll #, Lat, Lon hidden on screen
     ),
     buttons     = list(
       list(extend = "copy",  text = "Copy",
-           exportOptions = list(columns = 0:9, modifier = list(search = "applied"))),
+           exportOptions = list(columns = 0:11, modifier = list(search = "applied"))),
       list(extend = "csv",   text = "Download CSV (filtered)",
            filename = "wpg_nonres_new_permits_filtered",
-           exportOptions = list(columns = 0:9, modifier = list(search = "applied"))),
+           exportOptions = list(columns = 0:11, modifier = list(search = "applied"))),
       list(extend = "print", text = "Print")
     ),
     scrollX    = TRUE,
