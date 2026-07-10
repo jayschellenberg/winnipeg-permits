@@ -323,7 +323,7 @@ tags$style(HTML("
 .btn-reset:hover { background: #c0392b; color: #ffffff; }
 .streetnum-range { display: flex; gap: 6px; align-items: center; }
 .streetnum-input {
-  flex: 1 1 0; min-width: 0; padding: 6px 8px;
+  flex: 0 0 72px; width: 72px; min-width: 0; padding: 6px 8px;
   border: 1px solid #ccc; border-radius: 4px;
   font-size: 14px; background: white;
 }
