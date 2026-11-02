@@ -1,5 +1,7 @@
 # Winnipeg Building Permits
 
+Status: Maintained | Next: tbd | Blocked: none | Updated: 2026-11-01
+
 Interactive reports on City of Winnipeg new-construction building permits, prepared by Jason M. Schellenberg, P. App, AACI ([JKS Consulting Inc.](https://jksconsultinginc.com)).
 
 **Live site:** https://winnipeg-permits.vercel.app
