@@ -33,7 +33,7 @@ jobs:
       R_KEEP_PKG_SOURCE: "yes"
     steps:
       - name: Checkout repo
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Install system libraries for sf
         run: |
@@ -69,7 +69,7 @@ jobs:
         uses: quarto-dev/quarto-actions/setup@8a96df13519ee81fd526f2dfca5962811136661b # v2
 
       - name: Restore render cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: .cache
           key: quarto-render-cache-${{ github.run_id }}
