@@ -236,6 +236,10 @@ if (isTRUE(params$show_parcels) && parcel_total_eligible > 0) {
     permits_pts <- permits |>
       filter(!is.na(latitude), !is.na(longitude)) |>
       st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE)
+    # City parcel polygons are occasionally invalid (self-intersections),
+    # which makes GEOS throw a TopologyException in st_within
+    parcels_sf <- sf::st_make_valid(parcels_sf)
+    parcels_sf <- parcels_sf[!sf::st_is_empty(parcels_sf), ]
     suppressWarnings(st_agr(parcels_sf) <- "constant")
     joined <- suppressMessages(
       st_join(permits_pts, parcels_sf, join = st_within, left = FALSE)
