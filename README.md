@@ -1,6 +1,6 @@
 # Winnipeg Building Permits
 
-Status: Maintained | Next: confirm weekly render passes after parcel make_valid fix | Blocked: none | Updated: 2026-11-02
+Status: Maintained | Next: commit and deploy the Protomaps basemap swap (R/basemap.R, vendor/) | Blocked: none | Updated: 2026-11-05
 
 Interactive reports on City of Winnipeg new-construction building permits, prepared by Jason M. Schellenberg, P. App, AACI ([JKS Consulting Inc.](https://jksconsultinginc.com)).
 

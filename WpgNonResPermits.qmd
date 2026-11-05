@@ -32,6 +32,7 @@ suppressPackageStartupMessages({
   library(stringr)
   library(lubridate)
   library(leaflet)
+  source("R/basemap.R")  # Protomaps 'Light' basemap (replaces CARTO)
   library(leaflet.extras)
   library(DT)
   library(crosstalk)
@@ -926,7 +927,7 @@ permits$.popup <- popup_html
 sd <- SharedData$new(permits, key = ~.rowkey, group = "permits")
 
 map_widget <- leaflet(sd, width = "100%", height = 560) |>
-  addProviderTiles(providers$CartoDB.Positron, group = "Light") |>
+  add_basemap(group = "Light") |>
   addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") |>
   addProviderTiles(providers$OpenStreetMap, group = "OSM")
 
