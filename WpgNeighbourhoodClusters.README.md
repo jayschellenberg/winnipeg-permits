@@ -3,7 +3,7 @@
 Drop-in replacement for the 235-polygon `WpgNeighbourhoods.geojson` when you only
 need the 23 WRHA **neighbourhood clusters** — dissolved, cleaned, and ready to map.
 
-Canonical copy lives in `D:/Dropbox/Appraisal/RProjects/BaseFiles/`.
+Canonical copy lives in `D:/Dropbox/Appraisal/RProjects/appraisal-templates/base-files/`.
 Project-local copies should match that one byte-for-byte.
 
 ---
