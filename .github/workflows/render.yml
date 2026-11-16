@@ -28,7 +28,10 @@ concurrency:
 
 jobs:
   render:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04 (Nov 2026), whose sudo-rs ignores
+    # `sudo -E`, so r-lib/actions' pak install loses R_LIB_FOR_PAK and fails.
+    # Revisit once r-lib/actions supports 26.04.
+    runs-on: ubuntu-24.04
     env:
       R_KEEP_PKG_SOURCE: "yes"
     steps:
