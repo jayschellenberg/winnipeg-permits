@@ -32,7 +32,7 @@
 
   const map = L.map('map', { preferCanvas: true }).setView([49.8951, -97.1384], 11);
 
-  const cartoLight = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+  const cartoLight = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png?key=cb1_2r5c_1_12c531426d9aa092a601b7da', {
     attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
     maxZoom: 19
   }).addTo(map);
